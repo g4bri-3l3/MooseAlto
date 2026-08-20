@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Reports generated at runtime by MooseAlto.ps1 (timestamp based filenames)
+report_*.html
+report_*.csv
+*_inventory.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
