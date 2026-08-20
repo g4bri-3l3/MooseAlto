@@ -528,8 +528,7 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI pro
   `untrust`/`internet`/`outside`/`external` for the internet-facing
   interface, pass `-InternetZones` explicitly, or internet-exposure checks
   will under-report.
-- **IPv4 only.** IP ranges, `[Negate]` exclusions, and address-object names
-  are compared by exact string match, not true containment.
+- **IPv4 only.** Containment (used by shadow/duplicate detection) does real interval math for plain CIDR/IP and "IP-IP" ranges, including mixing the two (e.g. correctly detecting that a range is fully inside a broader CIDR). A [Negate] X broader side (or multiple, which combine with AND semantics, matching only if the address avoids all of them) is also handled against a plain CIDR/range narrower side: covered if the narrower interval has zero overlap with every excluded range. Two narrower cases still fall back to exact string match rather than true containment: a [Negate] narrower side (rare enough in practice not to be worth the added complexity), and comparing two different negated expressions to each other (identical ones still match exactly, just not a genuinely different-but-overlapping pair). Address-object names are also exact-match, but only actually matters when -AddressObjectsCsv isn't supplied: when it is, names are resolved to real addresses before any comparison happens.
 - **This is a hygiene review aid, not an authoritative security audit.**
   Always have a human review findings, especially `shadowed_rule` and
   anything touching the internet, before changing production policy.
