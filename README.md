@@ -531,7 +531,7 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI pro
 - **This is a hygiene review aid, not an authoritative security audit.**
   Always have a human review findings, especially `shadowed_rule` and
   anything touching the internet, before changing production policy.
-- App-ID risky-application names are best-effort, not pulled from a live
+- **App-ID risky-application names are best-effort**, not pulled from a live
 App-ID database. Verify before trusting a "clean" result on
 application-based rules. Palo Alto updates App-ID definitions regularly
 via content-pack updates, so names can be renamed or added over time.
