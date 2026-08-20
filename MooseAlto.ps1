@@ -111,20 +111,20 @@ $script:MooseAltoVersion = "1.0"
 
 function Show-Banner {
     $lines = @(
-        '################################################################'
-        '#  ___            ___                                          #'
-        "# /   \          /   \               MooseAlto v$script:MooseAltoVersion            #"
-        '# \_   \        /  __/      Palo Alto Firewall Rule Analyzer   #'
-        '#  _\   \      /  /__                                          #'
-        '#  \___  \____/   __/                                          #'
-        '#      \_       _/                                             #'
-        '#        | @ @  \_                  No blind spots.            #'
-        '#        |                         Stay moose-alert.           #'
-        '#      _/     /\                      Stay secure.             #'
-        '#     /o)  (o/\ \_                                             #'
-        '#     \_____/ /                                                #'
-        '#       \____/               https://github.com/g4bri-3l3/     #'
-        '################################################################'
+        '######################################################################'
+        '#  ___            ___                                                #'
+        "# /   \          /   \                  MooseAlto v$script:MooseAltoVersion               #"
+        '# \_   \        /  __/         Palo Alto Firewall Rule Analyzer      #'
+        '#  _\   \      /  /__                                                #'
+        '#  \___  \____/   __/                                                #'
+        '#      \_       _/                                                   #'
+        '#        | @ @  \_                     No blind spots.               #'
+        '#        |                            Stay moose-alert.              #'
+        '#      _/     /\                         Stay secure.                #'
+        '#     /o)  (o/\ \_                                                   #'
+        '#     \_____/ /                                                      #'
+        '#       \____/              https://github.com/g4bri-3l3/MooseAlto   #'
+        '######################################################################'
     )
     $lineCount = $lines.Count
     for ($i = 0; $i -lt $lineCount; $i++) {
