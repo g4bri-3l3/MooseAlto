@@ -1,0 +1,8 @@
+Name,Source Zone,Source Address,Destination Zone,Destination Address,Application,Service,Action,Hit Count,Last Hit,Rule Usage Rule Usage
+Allow-Stale-OneOff-Grant,Trust,10.40.1.0/24,Untrust,203.0.113.20/32,web-browsing,application-default,allow,340,2024-06-08,used
+Allow-Stale-Old-Vendor-Access,DMZ,10.40.2.10/32,Untrust,198.51.100.30/32,ssl,application-default,allow,12,2025-04-04,used
+Allow-Active-Daily-Traffic,Trust,10.40.3.0/24,Untrust,any,web-browsing,application-default,allow,918200,2026-08-16,used
+Allow-Recent-New-Rule,Trust,10.40.4.0/24,DMZ,10.40.4.50/32,ssl,application-default,allow,55,2026-07-03,used
+Allow-Zero-Hits-Never-Used,Trust,10.40.5.0/24,Untrust,any,ftp,application-default,allow,0,,unused
+Allow-Marked-Unused-By-Panorama,DMZ,10.40.6.0/24,Untrust,any,telnet,application-default,allow,3,2024-01-15,unused
+Allow-Partially-Used-Multi-Firewall,Trust,10.40.7.0/24,Untrust,any,ms-rdp,application-default,allow,410,2026-06-01,partially used

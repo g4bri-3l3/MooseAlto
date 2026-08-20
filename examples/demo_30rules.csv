@@ -1,0 +1,31 @@
+Name,Source Zone,Source Address,Destination Zone,Destination Address,Application,Service,Action,Profile,Tags,Hit Count,Last Hit,Rule Usage Rule Usage
+Allow-DMZ-Subnet-Broad,outside,any,dmz,10.45.0.0/16,any,any,allow,none,legacy-open,600,2026-08-17,used
+Deny-Compromised-Host-DMZ,outside,any,dmz,10.45.10.99/32,any,any,deny,none,incident-response,0,-,unused
+Allow-RDP-From-Internet,outside,any,dmz,10.40.10.5/32,ms-rdp,application-default,allow,none,,320,2026-08-16,used
+Allow-SSH-Admin-From-Internet,outside,any,dmz,10.40.10.10/32,ssh,application-default,allow,none,admin,15,2024-11-02,partially used
+Allow-Telnet-Legacy-Switch,outside,any,mgmt,10.40.90.2/32,any,tcp-23,allow,none,legacy,3,2023-06-01,unused
+Allow-FTP-Legacy-Transfer,outside,any,dmz,10.40.60.5/32,ftp,application-default,allow,none,legacy,8,2023-09-14,unused
+Allow-AnyDesk-Remote-Support,outside,any,inside,10.10.5.0/24,anydesk,application-default,allow,none,remote-support,88,2026-08-10,used
+Allow-TeamViewer-Vendor-Access,outside,any,inside,10.10.5.0/24,teamviewer,application-default,allow,none,vendor,42,2026-07-20,partially used
+Allow-Wide-Open-DMZ-Inbound,outside,any,dmz,any,any,any,allow,none,legacy-open,410,2026-08-17,used
+Allow-Corp-To-SWIFT-Zone,inside,any,swift,any,any,application-default,allow,none,,55,2026-08-01,used
+Allow-POS-To-CDE-Broad,pos,any,cde,any,any,any,allow,none,,12,2025-01-15,partially used
+Allow-Broad-Server-Subnet,inside,10.50.0.0/16,server,any,any,any,allow,strict,,900,2026-08-17,used
+Allow-Specific-DB-Server,inside,10.50.5.10/32,server,10.60.1.10/32,mysql,application-default,allow,strict,,0,-,unused
+Allow-Duplicate-Web-Rule-A,inside,10.10.5.0/24,outside,203.0.113.80/32,ssl,application-default,allow,strict,,60,2026-08-10,used
+Allow-Duplicate-Web-Rule-B,inside,10.10.5.0/24,outside,203.0.113.80/32,ssl,application-default,allow,strict,,0,-,unused
+Allow-DoT-Explicit-Port,inside,10.10.5.0/24,outside,any,any,tcp-853,allow,none,,50,2026-08-11,used
+Allow-DoH-Explicit-App,inside,10.10.5.0/24,outside,8.8.8.8/32,dns-over-https,application-default,allow,none,,75,2026-08-14,used
+Allow-Plain-DNS-Google-Cloudflare,inside,10.10.5.0/24,outside,8.8.8.8;1.1.1.1,dns,udp-53,allow,none,,300,2026-08-17,used
+Allow-Plain-DNS-Unrestricted,inside,10.10.5.0/24,outside,any,dns,udp-53,allow,none,legacy,60,2026-03-01,partially used
+Allow-Negated-Single-Range,any,[Negate]  198.51.100.0/24,any,any,anydesk,application-default,allow,none,,4,2024-02-10,unused
+Allow-Negated-RFC1918-Full,dmz,[Negate]  10.0.0.0-10.255.255.255;[Negate]  172.16.0.0-172.31.255.255;[Negate]  192.168.0.0-192.168.255.255,outside,any,web-browsing,application-default,allow,strict,,180,2026-08-16,used
+Allow-Temp-Vendor-POC,outside,any,inside,any,any,any,allow,none,temp-poc,9,2025-09-05,partially used
+Test for POC,server,10.200.0.0/16,outside,62.49.10.92/28,https;ssh,any,allow,none,poc,15,2026-07-01,partially used
+[Disabled] Old-Legacy-VPN-Rule,outside,any,inside,10.10.1.0/24,ipsec,application-default,allow,none,legacy,0,-,unused
+Allow-Workstation-To-FileServer-SMB,inside,10.10.9.0/24,server,any,ms-ds-smb,application-default,allow,none,,95,2026-08-12,used
+Allow-Broad-Internal-Lateral,inside,any,server,any,any,any,allow,none,,410,2026-08-15,used
+Allow-Port-Only-No-AppID,inside,10.10.5.0/24,dmz,10.40.30.5/32,any,tcp-8443,allow,strict,,140,2026-08-17,used
+Allow-Zero-Hit-Old-Rule,inside,10.10.9.0/24,dmz,10.40.40.5/32,web-browsing,application-default,allow,strict,,0,-,unused
+Allow-Stale-OneOff-Grant,inside,10.10.9.10/32,dmz,10.40.50.5/32,ssl,application-default,allow,strict,,25,2024-05-20,partially used
+Allow-Corp-To-Salesforce,inside,10.10.5.0/24,outside,203.0.113.40/32,ssl,application-default,allow,strict,saas,520,2026-08-17,used
