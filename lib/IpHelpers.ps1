@@ -158,10 +158,51 @@ function Get-AddressBounds {
     return $result
 }
 
+function Test-IntervalsOverlap {
+    param($A, $B)
+    return -not ($A.End -lt $B.Start -or $B.End -lt $A.Start)
+}
+
+function Test-NarrowerAvoidsNegatedSet {
+    # For a Broader address list made ENTIRELY of "[Negate] X" tokens -
+    # which combine with AND semantics (matches only if it avoids EVERY
+    # excluded X, same assumption Test-IsNegatedPublicPattern above
+    # already makes for the all-RFC1918 case), a single-interval Narrower
+    # token is covered if it has zero overlap with each excluded X. Only
+    # handles a Narrower with computable bounds (a plain CIDR/range): a
+    # Narrower that's itself a "[Negate]" expression isn't attempted here,
+    # since that combination is rare enough in practice not to be worth
+    # the added complexity right now.
+    param([array]$NegatedBroaderRawTokens, $NarrowerBounds)
+    foreach ($bTok in $NegatedBroaderRawTokens) {
+        $inner = $bTok -replace '^\[Negate\]\s*', ''
+        $exclBounds = Get-AddressBounds $inner
+        if ($null -eq $exclBounds) { return $false }
+        if (Test-IntervalsOverlap $NarrowerBounds $exclBounds) { return $false }
+    }
+    return $true
+}
+
 function Test-NetworksContain {
     param($Broader, $Narrower)
     if ($null -eq $Broader) { return $true }
     if ($null -eq $Narrower) { return $false }
+
+    # Broader made entirely of "[Negate] X" tokens combines with AND
+    # semantics, unlike the OR semantics that governs a normal multi-value
+    # list, so it can't go through the same per-token "any one match is
+    # enough" loop below.
+    $allNegated = $Broader.Count -gt 0 -and (@($Broader | Where-Object { $_ -notmatch '^\[Negate\]' })).Count -eq 0
+    if ($allNegated) {
+        foreach ($nTok in $Narrower) {
+            if ($Broader -contains $nTok) { continue }
+            $nBounds = Get-AddressBounds $nTok
+            if ($null -eq $nBounds) { return $false }
+            if (-not (Test-NarrowerAvoidsNegatedSet -NegatedBroaderRawTokens $Broader -NarrowerBounds $nBounds)) { return $false }
+        }
+        return $true
+    }
+
     foreach ($nTok in $Narrower) {
         $covered = $false
         foreach ($bTok in $Broader) {
@@ -209,6 +250,27 @@ function Test-NetworksContainFast {
     param($Broader, $Narrower)
     if ($null -eq $Broader) { return $true }
     if ($null -eq $Narrower) { return $false }
+
+    # Broader made entirely of "[Negate] X" tokens combines with AND
+    # semantics (matches only if it avoids EVERY excluded X), unlike the
+    # OR semantics of a normal multi-value list, so it needs handling
+    # separately from the per-token loop below, which assumes OR.
+    $allNegated = $Broader.Count -gt 0 -and (@($Broader | Where-Object { $_.Raw -notmatch '^\[Negate\]' })).Count -eq 0
+    if ($allNegated) {
+        $negatedRaw = $Broader | ForEach-Object { $_.Raw }
+        foreach ($n in $Narrower) {
+            # Exact match first: two rules using the identical negation
+            # expression are still "the same address" for duplicate/shadow
+            # purposes, regardless of the interval math below (which only
+            # handles a Narrower with its own computable bounds).
+            if ($negatedRaw -contains $n.Raw) { continue }
+            if (-not $n.HasBounds) { return $false }
+            $nBounds = [PSCustomObject]@{ Start = $n.Start; End = $n.End }
+            if (-not (Test-NarrowerAvoidsNegatedSet -NegatedBroaderRawTokens $negatedRaw -NarrowerBounds $nBounds)) { return $false }
+        }
+        return $true
+    }
+
     foreach ($n in $Narrower) {
         $covered = $false
         foreach ($b in $Broader) {
@@ -231,4 +293,3 @@ function Test-ListContains {
     }
     return $true
 }
-
