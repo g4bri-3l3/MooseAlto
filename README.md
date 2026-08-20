@@ -255,7 +255,7 @@ lacks unambiguous evidence.
 
 ## AI-assisted analysis (optional)
 
-**Getting a Gemini API key.** Go to
+**Getting a Gemini API key:** Go to
 [aistudio.google.com/api-keys](https://aistudio.google.com/api-keys), sign
 in with a Google account, and click "Create API key" (first-time users get
 a one-time terms-of-service prompt first).
