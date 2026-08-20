@@ -11,6 +11,8 @@
 $script:CidrPartsCache = @{}
 $script:Int64IPCache = @{}
 $script:IsPlainIPCache = @{}
+$script:IsIpRangeCache = @{}
+$script:AddressBoundsCache = @{}
 
 function ConvertTo-Int64IP {
     param([string]$IPAddress)
@@ -109,6 +111,53 @@ function Test-IsNegatedPublicPattern {
     return $true
 }
 
+function Test-IsIpRange {
+    # An "IP-IP" range, e.g. "10.5.5.10-10.5.5.50". Distinct from a plain
+    # CIDR/IP (which uses "/", never "-"), so there's no ambiguity between
+    # the two syntaxes.
+    param([string]$Token)
+    if ($script:IsIpRangeCache.ContainsKey($Token)) { return $script:IsIpRangeCache[$Token] }
+    $result = [bool]($Token -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s*-\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+    $script:IsIpRangeCache[$Token] = $result
+    return $result
+}
+
+function Get-AddressBounds {
+    # Returns a Start/End Int64 pair for any token expressible as one
+    # contiguous numeric interval: a plain CIDR/IP (network address to
+    # broadcast address) or an "IP-IP" range (both ends parsed directly).
+    # Returns $null for anything else - a "[Negate] X" expression isn't a
+    # single contiguous interval in general (it's everything EXCEPT X,
+    # which splits into zero, one, or two remaining intervals depending on
+    # where X sits), and an unresolved address-object name has no interval
+    # at all without its definition. Both still fall back to exact string
+    # matching in the callers below, same as before this function existed.
+    param([string]$Token)
+    if ($script:AddressBoundsCache.ContainsKey($Token)) { return $script:AddressBoundsCache[$Token] }
+    $result = $null
+    if (Test-IsPlainIP $Token) {
+        $parts = Get-CidrParts $Token
+        $baseInt = ConvertTo-Int64IP $parts.IP
+        $hostBits = 32 - $parts.Prefix
+        $mask = (([Int64]0xFFFFFFFF) -shl $hostBits) -band ([Int64]0xFFFFFFFF)
+        $networkInt = $baseInt -band $mask
+        $blockSize = if ($hostBits -ge 32) { [Int64]0xFFFFFFFF } else { ([Int64]1 -shl $hostBits) - 1 }
+        $result = [PSCustomObject]@{ Start = $networkInt; End = $networkInt + $blockSize }
+    }
+    elseif (Test-IsIpRange $Token) {
+        $ipParts = $Token -split '\s*-\s*'
+        $startInt = $null; $endInt = $null
+        $startOk = $false; $endOk = $false
+        try { $startInt = ConvertTo-Int64IP $ipParts[0].Trim(); $startOk = $true } catch {}
+        try { $endInt = ConvertTo-Int64IP $ipParts[1].Trim(); $endOk = $true } catch {}
+        if ($startOk -and $endOk -and $startInt -le $endInt) {
+            $result = [PSCustomObject]@{ Start = $startInt; End = $endInt }
+        }
+    }
+    $script:AddressBoundsCache[$Token] = $result
+    return $result
+}
+
 function Test-NetworksContain {
     param($Broader, $Narrower)
     if ($null -eq $Broader) { return $true }
@@ -116,8 +165,10 @@ function Test-NetworksContain {
     foreach ($nTok in $Narrower) {
         $covered = $false
         foreach ($bTok in $Broader) {
-            if ((Test-IsPlainIP $bTok) -and (Test-IsPlainIP $nTok)) {
-                if (Test-CidrContains -Broader $bTok -Narrower $nTok) { $covered = $true; break }
+            $bBounds = Get-AddressBounds $bTok
+            $nBounds = Get-AddressBounds $nTok
+            if ($bBounds -and $nBounds) {
+                if ($bBounds.Start -le $nBounds.Start -and $nBounds.End -le $bBounds.End) { $covered = $true; break }
             }
             elseif ($bTok -eq $nTok) { $covered = $true; break }
         }
@@ -131,18 +182,18 @@ function ConvertTo-ParsedAddressList {
     # The shadow/duplicate detection loops compare every rule against every
     # earlier one, so the same rule's own address gets looked at again on
     # every comparison it takes part in - up to n-1 times. Parsing it once
-    # up front and comparing pre-parsed integers/prefixes in the loop
+    # up front and comparing pre-parsed Start/End integers in the loop
     # itself (see Test-NetworksContainFast) avoids re-running regex
     # matching and IPAddress parsing that many times over.
     param($AddrTokens)
     if ($null -eq $AddrTokens) { return $null }
     $parsed = foreach ($tok in $AddrTokens) {
-        if (Test-IsPlainIP $tok) {
-            $parts = Get-CidrParts $tok
-            [PSCustomObject]@{ IsIP = $true; Int64 = (ConvertTo-Int64IP $parts.IP); Prefix = $parts.Prefix; Raw = $tok }
+        $bounds = Get-AddressBounds $tok
+        if ($bounds) {
+            [PSCustomObject]@{ HasBounds = $true; Start = $bounds.Start; End = $bounds.End; Raw = $tok }
         }
         else {
-            [PSCustomObject]@{ IsIP = $false; Int64 = 0; Prefix = 0; Raw = $tok }
+            [PSCustomObject]@{ HasBounds = $false; Start = 0; End = 0; Raw = $tok }
         }
     }
     return @($parsed)
@@ -152,18 +203,17 @@ function Test-NetworksContainFast {
     # Same semantics as Test-NetworksContain, but takes address lists
     # already pre-parsed by ConvertTo-ParsedAddressList, so no parsing
     # happens inside the O(n^2) comparison loop itself, just integer
-    # bitmask arithmetic.
+    # comparisons. Covers plain CIDR/IP and "IP-IP" ranges uniformly
+    # (both reduce to a Start/End interval); anything else falls back to
+    # exact string matching, same as it always has.
     param($Broader, $Narrower)
     if ($null -eq $Broader) { return $true }
     if ($null -eq $Narrower) { return $false }
     foreach ($n in $Narrower) {
         $covered = $false
         foreach ($b in $Broader) {
-            if ($b.IsIP -and $n.IsIP) {
-                if ($b.Prefix -le $n.Prefix) {
-                    $mask = (([Int64]0xFFFFFFFF) -shl (32 - $b.Prefix)) -band ([Int64]0xFFFFFFFF)
-                    if (($b.Int64 -band $mask) -eq ($n.Int64 -band $mask)) { $covered = $true; break }
-                }
+            if ($b.HasBounds -and $n.HasBounds) {
+                if ($b.Start -le $n.Start -and $n.End -le $b.End) { $covered = $true; break }
             }
             elseif ($b.Raw -eq $n.Raw) { $covered = $true; break }
         }
