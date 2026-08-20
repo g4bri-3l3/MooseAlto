@@ -27,7 +27,7 @@ checks with an optional AI-assisted summary (Gemini).
 ![MooseAlto report walkthrough](examples/demo_report.gif)
 
 A full sample report is in
-[`examples/demo.html`](https://github.com/g4bri-3l3/MooseAlto/blob/main/examples/demo.html),
+[`examples/demo_report.html`](https://github.com/g4bri-3l3/MooseAlto/blob/main/examples/demo_report.html),
 generated from
 [`examples/demo_30rules.csv`](https://github.com/g4bri-3l3/MooseAlto/blob/main/examples/demo_30rules.csv):
 a curated 30 rule ruleset that triggers a broad mix of the checks below.
