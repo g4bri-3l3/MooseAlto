@@ -532,8 +532,9 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI pro
   Always have a human review findings, especially `shadowed_rule` and
   anything touching the internet, before changing production policy.
 - App-ID risky-application names are best-effort, not pulled from a live
-  App-ID database. Verify before trusting a "clean" result on
-  application-based rules.
+App-ID database. Verify before trusting a "clean" result on
+application-based rules. Palo Alto updates App-ID definitions regularly
+via content-pack updates, so names can be renamed or added over time.
 - **Large rulesets (roughly 6,000+ rules) get noticeably slow.** The
   duplicate/shadow detection checks are fundamentally n^2: every rule
   gets compared against earlier ones. Zone-pair bucketing (see
@@ -541,9 +542,9 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI pro
   comparisons between rules whose zones could never match, but doesn't
   change that underlying shape, since a fixed, small number of distinct
   zones means each zone-pair bucket still grows roughly linearly with
-  ruleset size. In a test, 4,000 rules finished in about a minute;
-  6,000 rules took over two minutes for detection alone; 20,000 rules
-  took ~ 15 minutes.
+  ruleset size. In a few test made, 4,000 rules finishes in about a minute;
+6,000 rules took over two minutes for detection alone; 20,000 rules
+took ~ 15 minutes.
 
 ## License
 
