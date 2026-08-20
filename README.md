@@ -105,12 +105,11 @@ internet, via zone name or a concrete public IP):
   address, destination address, application, AND service are all "any"
   simultaneously (see the severity methodology section below).
 
-**Critical zone isolation** (zones such as SWIFT CSCF,
-PCI DSS, FFIEC, AD, MGMT,  only active if `-CriticalZones` is set, no universal
+**Critical zone isolation** (financial services: SWIFT, PCI DSS  only active if `-CriticalZones` is set, no universal
 default since this is entirely org-specific):
 - `unrestricted_access_to_critical_zone`: a non-critical zone reaches a
   configured critical zone (e.g. SWIFT secure zone, CDE, ATM, core
-  banking, HSM) with source zone, source address, or application left
+  banking, HSM, AD, MGMT) with source zone, source address, or application left
   unrestricted. Fires independently of internet exposure: SWIFT CSCF and
   PCI DSS both require these zones isolated from the *general enterprise
   network*, not just from the internet. A Trust-zone workstation reaching
@@ -534,7 +533,7 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI pro
   anything touching the internet, before changing production policy.
 - App-ID risky-application names are best-effort, not pulled from a live
   App-ID database. Verify before trusting a "clean" result on
-  application-based rules. Also it's often updated from Palo.
+  application-based rules.
 - **Large rulesets (roughly 6,000+ rules) get noticeably slow.** The
   duplicate/shadow detection checks are fundamentally n^2: every rule
   gets compared against earlier ones. Zone-pair bucketing (see
@@ -542,7 +541,7 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI pro
   comparisons between rules whose zones could never match, but doesn't
   change that underlying shape, since a fixed, small number of distinct
   zones means each zone-pair bucket still grows roughly linearly with
-  ruleset size. In a few test made, 4,000 rules finishes in about a minute;
+  ruleset size. In a test, 4,000 rules finished in about a minute;
   6,000 rules took over two minutes for detection alone; 20,000 rules
   took ~ 15 minutes.
 
