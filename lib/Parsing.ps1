@@ -46,8 +46,7 @@ function Parse-ListField {
     # ("tcp-5444,udp-53") instead of the more commonly confirmed ";".
     # Splitting on either avoids silently treating the whole string as one
     # unrecognized token, which would make every port in it invisible to
-    # the risky-port checks (this is exactly how a real DNS-on-udp/53 rule
-    # went undetected before this fix).
+    # the risky-port checks.
     param([string]$Field)
     $Field = $Field.Trim()
     if ($Field -eq "" -or $Field.ToLower() -eq "any") { return $null }
@@ -140,6 +139,7 @@ function Import-PaloAltoRules {
     }
 
     $hasDisabledColumn = $realHeaderNames -contains "Disabled"
+    $hasOptionsColumn = $realHeaderNames -contains "Options"
 
     # Match by substring rather than the exact "Rule Usage: Hit Count" -
     # different PAN-OS/Panorama versions and export types have been seen to
@@ -232,6 +232,8 @@ function Import-PaloAltoRules {
             HitCount    = if ($hasHitCountColumn) { $row.$hitCountColumnName } else { "" }
             UsageStatus = if ($hasUsageStatusColumn -and $row.$usageStatusColumnName) { $row.$usageStatusColumnName.Trim().ToLower() } else { "" }
             LastHit     = if ($hasLastHitColumn) { $row.$lastHitColumnName } else { "" }
+            Options     = if ($hasOptionsColumn) { $row.Options } else { "" }
+            HasOptionsColumn = $hasOptionsColumn
         }
         $i++
     }
@@ -411,4 +413,3 @@ function Resolve-AddressList {
     }
     return @($resolved | Select-Object -Unique)
 }
-
