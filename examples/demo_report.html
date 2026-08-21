@@ -89,8 +89,8 @@ function clearMooseFilters(button) {
     \_____/ /
       \____/</pre><h1>MooseAlto: Palo Alto Firewall Rule Hygiene Report</h1>
 <p><b>Input file:</b> C:\Users\picci\Downloads\files\examples\demo_30rules.csv  </p>
-<p><b>Generated:</b> 2026-08-21 18:41:38 +02:00  </p>
-<p><b>Processing time:</b> 0,6s  </p>
+<p><b>Generated:</b> 2026-08-21 22:54:30 +02:00  </p>
+<p><b>Processing time:</b> 0,8s  </p>
 <details open><summary><h2>Summary</h2></summary>
 <table>
 <tr><th>Metric</th><th>Value</th></tr>
@@ -247,4 +247,24 @@ function clearMooseFilters(button) {
 <tr class='data-row'><td>Allow-Corp-To-Salesforce</td><td>Outbound</td><td>inside / 10.10.5.0/24</td><td>outside / 203.0.113.40/32</td><td>ssl</td><td>application-default</td><td><span class='action-allow'>allow</span></td><td>strict</td></tr>
 </tbody></table>
 <div class='filter-status'><button type='button' onclick='clearMooseFilters(this)'>Clear filters</button> <span class='status-text'></span></div>
+</details>
+<details open><summary><h2>🤖 AI-Assisted Summary (Gemini, IP addresses masked before sending)</h2></summary>
+<div class='ai-section'>
+<span class='ai-badge'>AI GENERATED. REVIEW BEFORE ACTING</span>
+<p>The firewall ruleset exhibits a highly critical security posture characterized by extensive, unrestricted inbound internet exposure of high-risk remote access and management protocols—including RDP, SSH, Telnet, AnyDesk, and TeamViewer—directly to sensitive internal and DMZ zones without any security profiles applied. Most alarmingly, an active incident response rule (Deny-Compromised-Host-DMZ) designed to block a compromised host is completely shadowed and rendered useless by a broad legacy inbound rule (Allow-DMZ-Subnet-Broad). Additionally, the ruleset permits uninspected outbound tunneling channels (DNS-over-TLS/HTTPS) and features overly permissive internal rules that allow lateral movement of risky protocols like SMB and MySQL. General hygiene is poor, with multiple stale, unused, and duplicate rules (some untouched for over three years) and a lack of an explicit intrazone drop rule for internet-facing zones.</p>
+<h3>Suggested Remediation Order</h3>
+<ol>
+<li>Immediately remediate the shadowed deny rule 'Deny-Compromised-Host-DMZ' by moving it above 'Allow-DMZ-Subnet-Broad' to ensure the compromised host is successfully blocked.</li>
+<li>Disable or restrict the highly exposed remote access rules reaching the 'inside' zone, specifically 'Allow-AnyDesk-Remote-Support' and 'Allow-TeamViewer-Vendor-Access' targeting IP-MASKED-6, and apply strict security profiles.</li>
+<li>Secure inbound management exposures by disabling or scoping down 'Allow-RDP-From-Internet' (RDP to IP-MASKED-2), 'Allow-SSH-Admin-From-Internet' (SSH to IP-MASKED-3), and 'Allow-Telnet-Legacy-Switch' (unencrypted Telnet to mgmt zone IP-MASKED-4).</li>
+<li>Decommission or heavily restrict broad inbound rules 'Allow-Wide-Open-DMZ-Inbound' (any destination in DMZ) and 'Allow-Temp-Vendor-POC' (any destination in inside zone, tagged 'temp-poc').</li>
+<li>Address complex bypass rules 'Allow-Negated-Single-Range' (AnyDesk inbound to any destination, stale for 923 days) and 'Allow-Negated-RFC1918-Full' (effectively public source to any destination) by replacing negated logic with explicit, scoped address objects.</li>
+<li>Secure outbound DNS channels by restricting 'Allow-DoT-Explicit-Port', 'Allow-DoH-Explicit-App', and 'Allow-Plain-DNS-Unrestricted' to authorized internal resolvers only, migrating to App-ID, and applying security profiles to prevent data exfiltration.</li>
+<li>Restrict broad internal rules allowing high-risk protocols to prevent lateral movement, specifically 'Allow-Workstation-To-FileServer-SMB' (SMB), 'Allow-Specific-DB-Server' (MySQL, currently shadowed), and 'Allow-Port-Only-No-AppID' (port 8443).</li>
+<li>Clean up stale and unused rules to reduce attack surface, including 'Allow-FTP-Legacy-Transfer' (stale 1072 days), 'Allow-Telnet-Legacy-Switch' (stale 1177 days), and 'Allow-Zero-Hit-Old-Rule'.</li>
+<li>Remove the redundant duplicate rule 'Allow-Duplicate-Web-Rule-B' which is identical to 'Allow-Duplicate-Web-Rule-A'.</li>
+<li>Implement a ruleset-wide explicit intrazone drop rule for the internet-facing zone to prevent default-allow intrazone traffic and silent scanning reconnaissance.</li>
+</ol>
+<p><em>Note: any IP addresses above appear as IP-MASKED-N placeholders. The model never saw your real addresses.</em></p>
+</div>
 </details></body></html>
