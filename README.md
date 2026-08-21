@@ -1,19 +1,17 @@
 ```
  ___            ___
 /   \          /   \
-\_   \        /  __/
- _\   \      /  /__
- \___  \____/   __/
+\_   \        /  __/   MooseAlto
+ _\   \      /  /__    Palo Alto / Panorama Firewall Rule Hygiene Analyzer
+ \___  \____/   __/    
      \_       _/
        | @ @  \_
-       |
-     _/     /\
+       |               
+     _/     /\         
     /o)  (o/\ \_
     \_____/ /
       \____/
 ```
-
-# MooseAlto: Palo Alto / Panorama Firewall Rule Hygiene Analyzer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/g4bri-3l3/MooseAlto/blob/main/LICENSE)
 [![Repo](https://img.shields.io/badge/GitHub-g4bri--3l3%2FMooseAlto-181717?logo=github)](https://github.com/g4bri-3l3/MooseAlto)
