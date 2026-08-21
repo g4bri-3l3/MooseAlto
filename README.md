@@ -235,6 +235,24 @@ dns-over-https. **Verify these names against your own App-ID database.**
 A few (rlogin/rsh/pptp, the modern data-store apps) are lower-confidence
 guesses and can be renamed/added across content-pack updates.
 
+## Comparing against a previous report
+
+`-CompareTo <path-to-previous-findings.csv>` compares this run's findings
+against an earlier run's findings CSV (the standard `report_TIMESTAMP.csv`
+this script itself produces). Matched by (rule name, finding type). The real limitation is that renaming
+a rule between runs makes its findings look "resolved" under the old name
+and "new" under the new one, even though nothing about the underlying
+issue changed - there's no attempt to track a rule's identity across a
+rename.
+
+When set, the Algorithmic-based Findings table gets an extra **Comparison**
+column: `New` (wasn't flagged last time), `Resolved` (was flagged last
+time, isn't now), or `Still present` (flagged both times). Findings that
+are now resolved no longer have a row in the current run, so they're
+added back in from the previous CSV and sorted into the table by severity
+alongside everything else, rather than listed separately. A summary card
+above the table shows the New/Resolved/Still-present counts at a glance.
+
 ## Internet Exposure Inventory
 
 Beyond the specific findings above, the report includes a dedicated
