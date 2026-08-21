@@ -48,10 +48,9 @@ Also, in
 Anything with an exact & algorithmic answer is checked **in local**, not forwarded
 to an LLM. There's no reason to risk a hallucinated answer on something
 that's computable (a rule either matches "any-any-any" or it doesn't). The
-LLM is only used, optionally (if you decide so), 
+LLM is only used, optionally **(if you decide so)**, 
 to write an executive-readable summary and suggest a remediation order over
-findings that were already computed deterministically. It never decides 
-whether something is risky.
+findings that were already computed.
 
 ## Checks performed
 
