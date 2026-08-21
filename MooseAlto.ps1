@@ -73,6 +73,12 @@
     A rule listing more than this many individual addresses in its source
     or destination (default 25) is flagged as an oversized address list,
     regardless of whether any single entry is risky.
+.PARAMETER CompareTo
+    Path to a findings CSV from a previous MooseAlto run. When set, the
+    report includes a Comparison section showing which findings are new,
+    resolved, or still present since that run. Matched by (rule name,
+    finding type), so renaming a rule between runs will show up as a
+    resolved finding under the old name and a new one under the new name.
 .PARAMETER SkipLLM
     Never prompt for or send data to Gemini. Deterministic report only.
 .PARAMETER ApiKey
@@ -95,6 +101,7 @@ Param(
     [string]$AddressGroupsCsv = "",
     [int]$StaleHitDays = 365,
     [int]$MaxAddressListSize = 25,
+    [string]$CompareTo = "",
     [switch]$SkipLLM,
     [string]$ApiKey = $env:GEMINI_API_KEY,
     [string]$Model = "gemini-3.5-flash"
@@ -212,6 +219,9 @@ if (-not $InputCsv) {
     $inputVal = Read-Host "Max individual addresses in a list before flagging it as oversized [$MaxAddressListSize]"
     if ($inputVal -match '^\d+$') { $MaxAddressListSize = [int]$inputVal }
 
+    $inputVal = Read-Host "Compare against a previous findings CSV, optional [none]"
+    if ($inputVal) { $CompareTo = $inputVal }
+
     $inputVal = Read-Host "Skip the AI analysis step entirely? (y/N)"
     if ($inputVal -match '^[Yy]') { $SkipLLM = $true }
 
@@ -294,7 +304,7 @@ Export-InventoryCsv -Inventory $inventory -CsvPath $inventoryCsvPath
 $processingElapsed = (Get-Date) - $processingStartTime
 $elapsedText = if ($processingElapsed.TotalMinutes -ge 1) { "{0}m {1}s" -f [int]$processingElapsed.TotalMinutes, $processingElapsed.Seconds } else { "{0:N1}s" -f $processingElapsed.TotalSeconds }
 
-$reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet
+$reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
 Save-HtmlReport -MarkdownLines $reportLines -HtmlPath $OutHtml
 
 Write-Host "Report written to $OutHtml" -ForegroundColor Green
