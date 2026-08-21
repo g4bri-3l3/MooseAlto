@@ -546,6 +546,10 @@ via content-pack updates, so names can be renamed or added over time.
 6,000 rules took over two minutes for detection alone; 20,000 rules
 took ~ 15 minutes.
 
+## Changelog
+
+See CHANGELOG.md for release history.
+
 ## License
 
 MIT. See
