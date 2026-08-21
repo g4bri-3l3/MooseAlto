@@ -69,6 +69,10 @@
     A rule with a non-zero hit count but a Last Hit date older than this
     many days is flagged as stale (default 365). Only applies if your
     export includes a Last Hit column.
+.PARAMETER MaxAddressListSize
+    A rule listing more than this many individual addresses in its source
+    or destination (default 25) is flagged as an oversized address list,
+    regardless of whether any single entry is risky.
 .PARAMETER SkipLLM
     Never prompt for or send data to Gemini. Deterministic report only.
 .PARAMETER ApiKey
@@ -90,6 +94,7 @@ Param(
     [string]$AddressObjectsCsv = "",
     [string]$AddressGroupsCsv = "",
     [int]$StaleHitDays = 365,
+    [int]$MaxAddressListSize = 25,
     [switch]$SkipLLM,
     [string]$ApiKey = $env:GEMINI_API_KEY,
     [string]$Model = "gemini-3.5-flash"
@@ -107,7 +112,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "1.0"
+$script:MooseAltoVersion = "1.1"
 
 function Show-Banner {
     $lines = @(
@@ -204,6 +209,9 @@ if (-not $InputCsv) {
     $inputVal = Read-Host "Days since last hit to flag a rule as stale [$StaleHitDays]"
     if ($inputVal -match '^\d+$') { $StaleHitDays = [int]$inputVal }
 
+    $inputVal = Read-Host "Max individual addresses in a list before flagging it as oversized [$MaxAddressListSize]"
+    if ($inputVal -match '^\d+$') { $MaxAddressListSize = [int]$inputVal }
+
     $inputVal = Read-Host "Skip the AI analysis step entirely? (y/N)"
     if ($inputVal -match '^[Yy]') { $SkipLLM = $true }
 
@@ -265,7 +273,7 @@ if ($addressObjects.Count -gt 0 -or $addressGroups.Count -gt 0) {
     Write-Host "Resolved address objects/groups: $($addressObjects.Count) object(s), $($addressGroups.Count) group(s) loaded." -ForegroundColor Green
 }
 
-$findings = Invoke-DeterministicChecks -Rules $rules -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays
+$findings = Invoke-DeterministicChecks -Rules $rules -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize
 $inventory = Build-InternetExposureInventory -Rules $rules -InternetZoneSet $InternetZoneSet
 
 Export-FindingsCsv -Findings $findings -Rules $rules -CsvPath $OutCsv
