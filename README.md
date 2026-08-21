@@ -1,8 +1,8 @@
 ```
  ___            ___
 /   \          /   \
-\_   \        /  __/   MooseAlto
- _\   \      /  /__    Palo Alto / Panorama Firewall Rule Hygiene Analyzer
+\_   \        /  __/   ## MooseAlto
+ _\   \      /  /__    ## Palo Alto / Panorama Firewall Rule Hygiene Analyzer
  \___  \____/   __/    
      \_       _/
        | @ @  \_
