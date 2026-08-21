@@ -364,7 +364,7 @@ underlying addresses instead of the object name.
 - Address Objects: `Name,Location,Type,Address,Tags`
 - Address Groups: `Name,Location,Members Count,Addresses,Tags` (note:
   **no `Type` column**. Static vs. dynamic can't be determined directly.
-  This is handled gracefully: a dynamic group's tag-match expression won't
+  This is handled by the code: a dynamic group's tag-match expression won't
   match any known object/group name, so it just falls through to the
   same "unknown name, stays opaque" behavior as an unresolved name.
   `Members Count` is used as a cross-check. If the resolved member count
@@ -423,7 +423,7 @@ internet exploitability**:
   - `missing_explicit_intrazone_internet_deny`
 
 **Notes:**
-- **`shadowed_rule` is High, not Low.** A dead rule isn't itself
+- **`shadowed_rule` is High** A dead rule isn't itself
   exploitable, but it's classified above simple hygiene items because it
   represents a *false sense of security*: whoever wrote it believed it
   was doing something protective, and it silently isn't.
@@ -471,8 +471,7 @@ files rarely need to change once working. The main script locates them via
 `$PSScriptRoot`, so the `lib` folder must sit next to the main script but
 works regardless of which directory you run the script from.
 
-Running the script always shows a banner first. If launched with no
-`-InputCsv` (e.g. double-clicked instead of run from a command line), it
+If the script is launched with no `-InputCsv` (e.g. double-clicked instead of run from a command line), it
 walks through an interactive setup instead of erroring out. Press Enter
 on any prompt to accept the default shown in `[brackets]`. Once a CSV path
 is known (via prompt or parameter), everything proceeds exactly the same
@@ -480,8 +479,7 @@ way. The optional Gemini call shows a live spinner while waiting on the
 network request.
 
 If `-OutHtml`/`-OutCsv` aren't specified, both default filenames include a
-shared timestamp (`report_yyyyMMdd_HHmmss.html` / `.csv`), so repeated runs
-never overwrite each other and a given pair is easy to match up. A second
+shared timestamp (`report_yyyyMMdd_HHmmss.html` / `.csv`). A second
 CSV covering the Internet Exposure Inventory is always written alongside
 the findings one, named `<OutCsv base>_inventory.csv`.
 
@@ -495,10 +493,7 @@ expensive as a ruleset grows. This is mitigated by grouping candidates
 by zone-pair signature first (two rules can only match/shadow each other
 if their zones are compatible), so a rule mostly only gets compared
 against others that could plausibly match rather than every earlier rule
-unconditionally. Measured on a synthetic 4,000-rule ruleset spanning 8
-zones: full analysis (parsing through HTML/CSV export) completes in
-roughly a minute. `Write-Progress` shows live progress during the
-longer phases.
+unconditionally.
 
 ## Usage
 
