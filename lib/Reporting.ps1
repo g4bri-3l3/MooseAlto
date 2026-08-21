@@ -74,8 +74,80 @@ function Get-SvgPieChart {
     return "<div class='pie-chart-wrap'><svg viewBox='0 0 $Size $Size' width='$Size' height='$Size'>$slices</svg><div class='pie-legend'>$legend</div></div>"
 }
 
+function Import-PreviousFindings {
+    # Reads a findings CSV from a prior MooseAlto run for -CompareTo.
+    # Deliberately tolerant of a different/older schema: an export from an
+    # earlier MooseAlto version won't have every column this version does,
+    # and that's fine here, since only Rule/Type/Severity are actually
+    # used for comparison. Returns $null (not an error) on anything that
+    # goes wrong reading the file, so the caller can skip the comparison
+    # section cleanly rather than letting a bad path crash the whole run.
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        Write-Host "Note: -CompareTo file not found ($Path). Skipping comparison." -ForegroundColor Yellow
+        return $null
+    }
+    try {
+        $rows = Import-Csv -Path $Path
+    }
+    catch {
+        Write-Host "Note: -CompareTo file couldn't be read as CSV ($Path). Skipping comparison." -ForegroundColor Yellow
+        return $null
+    }
+    if (-not $rows -or -not ($rows | Get-Member -Name "Rule" -MemberType NoteProperty) -or -not ($rows | Get-Member -Name "Type" -MemberType NoteProperty)) {
+        Write-Host "Note: -CompareTo file doesn't look like a MooseAlto findings CSV (missing Rule/Type columns). Skipping comparison." -ForegroundColor Yellow
+        return $null
+    }
+    return @($rows)
+}
+
+function Get-FindingsComparison {
+    # Matches findings between runs by (Rule name, Type) - the simplest
+    # key that works without needing the previous run's underlying rule
+    # data, only its findings CSV. The real limitation: renaming a rule
+    # between runs makes its findings look "resolved" in the old name and
+    # "new" in the new name, even though nothing about the underlying
+    # issue changed. Matching on rule content (zone/address/app) instead
+    # of name would handle that, but also raises its own ambiguity when
+    # content legitimately changes between runs, so this starts with the
+    # simpler name-based key and that known tradeoff stated plainly rather
+    # than guessing at a fuzzier match.
+    param([array]$CurrentFindings, [array]$PreviousFindings)
+
+    $previousKeys = @{}
+    foreach ($p in $PreviousFindings) {
+        $key = "$($p.Rule)|$($p.Type)"
+        $previousKeys[$key] = $p
+    }
+
+    $currentKeys = @{}
+    foreach ($f in $CurrentFindings) {
+        $key = "$($f.RuleName)|$($f.Type)"
+        $currentKeys[$key] = $f
+    }
+
+    $newFindings = @()
+    $persistentFindings = @()
+    foreach ($key in $currentKeys.Keys) {
+        if ($previousKeys.ContainsKey($key)) { $persistentFindings += $currentKeys[$key] }
+        else { $newFindings += $currentKeys[$key] }
+    }
+
+    $resolvedFindings = @()
+    foreach ($key in $previousKeys.Keys) {
+        if (-not $currentKeys.ContainsKey($key)) { $resolvedFindings += $previousKeys[$key] }
+    }
+
+    return [PSCustomObject]@{
+        New        = @($newFindings | Sort-Object { $SeverityOrder[$_.Severity] })
+        Resolved   = @($resolvedFindings | Sort-Object { $SeverityOrder[$_.Severity] })
+        Persistent = @($persistentFindings | Sort-Object { $SeverityOrder[$_.Severity] })
+    }
+}
+
 function Get-ReportLines {
-    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @())
+    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM)
 
     # Look up Source/Destination/Action/Profile by rule name at render time,
     # rather than attaching them to every finding at creation. This avoids
@@ -104,7 +176,26 @@ function Get-ReportLines {
 
     $lines = @("# MooseAlto: Palo Alto Firewall Rule Hygiene Report", "")
     $lines += "**Input file:** $InputCsvPath  "
-    $lines += "**Generated:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+    $lines += "**Generated:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')  "
+    if ($ElapsedText) {
+        $lines += "**Processing time:** $ElapsedText  "
+    }
+
+    # Only non-default/actually-supplied run settings show up here, not
+    # every parameter with its default value - the point is telling the
+    # reader what made THIS run different from a plain default run, not
+    # repeating the full parameter list.
+    $runInfoLines = @()
+    if ($AddressObjectsCsvPath) { $runInfoLines += "**Address objects:** $AddressObjectsCsvPath  " }
+    if ($AddressGroupsCsvPath) { $runInfoLines += "**Address groups:** $AddressGroupsCsvPath  " }
+    if ($CriticalZoneSet.Count -gt 0) { $runInfoLines += "**Critical zones:** $($CriticalZoneSet -join ', ')  " }
+    if ($InternetZoneSet.Count -gt 0 -and ($InternetZoneSet -join ',') -ne "untrust,internet,outside,external") {
+        $runInfoLines += "**Internet-facing zones:** $($InternetZoneSet -join ', ')  "
+    }
+    if ($StaleHitDays -ne 365) { $runInfoLines += "**Stale threshold:** $StaleHitDays days  " }
+    if ($MaxAddressListSize -ne 25) { $runInfoLines += "**Max address list size:** $MaxAddressListSize  " }
+    if ($SkipLLM) { $runInfoLines += "**AI analysis:** skipped (-SkipLLM)  " }
+    $lines += $runInfoLines
     $lines += ""
 
     $critCount = @($Findings | Where-Object { $_.Severity -eq "Critical" }).Count
@@ -121,9 +212,6 @@ function Get-ReportLines {
     $lines += "| High | $highCount |"
     $lines += "| Medium | $medCount |"
     $lines += "| Low | $lowCount |"
-    if ($ElapsedText) {
-        $lines += "| Processing time | $ElapsedText |"
-    }
     $lines += ""
 
     # -------- Rule Statistics --------
@@ -184,6 +272,60 @@ function Get-ReportLines {
     }
     $topServices = $serviceFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
 
+    # Which check types fire most often, across the whole findings list
+    # (not scoped to allow rules only, unlike the app/service stats above -
+    # a finding is a finding regardless of the rule's action). Tells you
+    # AT A GLANCE whether the ruleset has one systemic problem repeated
+    # many times (e.g. most High findings are all
+    # no_security_profile_on_exposed_rule) versus many different distinct
+    # issues, which severity counts alone don't distinguish.
+    $typeFrequency = @{}
+    foreach ($f in $Findings) {
+        if (-not $typeFrequency.ContainsKey($f.Type)) { $typeFrequency[$f.Type] = 0 }
+        $typeFrequency[$f.Type]++
+    }
+    $topTypes = $typeFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
+
+    # Which specific rules generate the most findings, so review effort
+    # can start with the rule causing the most noise rather than scanning
+    # the whole table for repeat offenders.
+    $ruleFrequency = @{}
+    foreach ($f in $Findings) {
+        if ($f.RuleName -eq "(ruleset-wide)") { continue }
+        if (-not $ruleFrequency.ContainsKey($f.RuleName)) { $ruleFrequency[$f.RuleName] = 0 }
+        $ruleFrequency[$f.RuleName]++
+    }
+    $topRulesByFindings = $ruleFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
+
+    # Tags follow the same multi-value convention as addresses/services
+    # elsewhere in this file (";" normally, "," seen on at least one real
+    # export), so split the same way rather than counting the whole
+    # field as one tag.
+    $tagFrequency = @{}
+    $noTagCount = 0
+    foreach ($r in $Rules) {
+        if (-not $r.Tags -or $r.Tags.Trim() -eq "" -or $r.Tags.Trim().ToLower() -eq "none") {
+            $noTagCount++
+            continue
+        }
+        foreach ($tag in ($r.Tags -split '[;,]')) {
+            $tagTrimmed = $tag.Trim()
+            if ($tagTrimmed -eq "") { continue }
+            if (-not $tagFrequency.ContainsKey($tagTrimmed)) { $tagFrequency[$tagTrimmed] = 0 }
+            $tagFrequency[$tagTrimmed]++
+        }
+    }
+    $topTags = $tagFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
+
+    # App-ID vs port-based split: a quick indicator of how modernized the
+    # ruleset's matching is. Three-way rather than two-way, since "neither
+    # restricts anything" (any/any) is a meaningfully different case from
+    # "restricted, but by port instead of App-ID" - collapsing them would
+    # overstate how port-based the ruleset actually is.
+    $appIdBasedCount = @($allowRules | Where-Object { $null -ne $_.Application }).Count
+    $portBasedCount = @($allowRules | Where-Object { $null -eq $_.Application -and $_.Service -and ($_.Service -notcontains "application-default") }).Count
+    $fullyOpenBothCount = $allowRules.Count - $appIdBasedCount - $portBasedCount
+
     $lines += "## Rule Statistics"
     $lines += ""
 
@@ -195,55 +337,163 @@ function Get-ReportLines {
     $statCardsHtml += "<div class='stat-card'><div class='stat-value'>$denyDropCount</div><div class='stat-label'>Deny / drop</div></div>"
     $statCardsHtml += "<div class='stat-card'><div class='stat-value'>$permissiveCount</div><div class='stat-label'>Permissive allow rules</div></div>"
     $statCardsHtml += "<div class='stat-card'><div class='stat-value'>$noProfileCount</div><div class='stat-label'>Allow rules, no profile</div></div>"
+    $statCardsHtml += "<div class='stat-card'><div class='stat-value'>$noTagCount</div><div class='stat-label'>Rules with no tags</div></div>"
     $statCardsHtml += "</div>"
 
     $severityPie = Get-SvgPieChart -Labels @("Critical", "High", "Medium", "Low") -Values @($critCount, $highCount, $medCount, $lowCount) -Colors @("#d9534f", "#f0ad4e", "#f7d774", "#adb5bd")
     $directionPie = Get-SvgPieChart -Labels @("Inbound", "Outbound", "Both sides", "Internal only") -Values @($inboundCount, $outboundCount, $bothCount, $internalCount) -Colors @("#5b8def", "#7bc67e", "#c77dd2", "#adb5bd")
+    $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#5b8def", "#f0ad4e", "#d9534f")
 
+    # All three pies together in one row rather than splitting the
+    # App-ID/port one off into its own row further down: three distribution
+    # charts belong next to each other, and a lone chart in its own
+    # full-width row was wasting most of that row's horizontal space.
     $chartsHtml = "<div class='chart-row'>"
     $chartsHtml += "<div><div class='pie-chart-title'>Findings by severity</div>$severityPie</div>"
     $chartsHtml += "<div><div class='pie-chart-title'>Allow rules by direction</div>$directionPie</div>"
+    $chartsHtml += "<div><div class='pie-chart-title'>Allow rules: App-ID vs port-based matching</div>$appIdPie</div>"
     $chartsHtml += "</div>"
 
-    $topAppsHtml = ""
+    # Each of these is its own self-contained block, built independently
+    # and only if it actually has data. Rather than hard-pairing specific
+    # ones together (which breaks visually whenever one side happens to be
+    # empty on a given ruleset, leaving its partner stranded alone with
+    # empty space next to it), they're collected into one list and packed
+    # two-per-row in whatever order they come, so a report is never left
+    # with an orphaned single table next to blank space unless there's
+    # truly an odd number of blocks with data.
+    $tableBlocks = New-Object System.Collections.Generic.List[string]
+
     if ($topApps) {
-        $topAppsHtml = "<div><div class='pie-chart-title'>Most common applications (allow rules)</div><table><tr><th>Application</th><th>Rule count</th></tr>"
-        foreach ($entry in $topApps) {
-            $topAppsHtml += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>"
-        }
-        $topAppsHtml += "</table></div>"
+        $html = "<div><div class='pie-chart-title'>Most common applications (allow rules)</div><table><tr><th>Application</th><th>Rule count</th></tr>"
+        foreach ($entry in $topApps) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
+        $tableBlocks.Add("$html</table></div>")
     }
-    $topServicesHtml = ""
     if ($topServices) {
-        $topServicesHtml = "<div><div class='pie-chart-title'>Most common services (allow rules, no App-ID)</div><table><tr><th>Service</th><th>Rule count</th></tr>"
-        foreach ($entry in $topServices) {
-            $topServicesHtml += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>"
-        }
-        $topServicesHtml += "</table></div>"
+        $html = "<div><div class='pie-chart-title'>Most common services (allow rules, no App-ID)</div><table><tr><th>Service</th><th>Rule count</th></tr>"
+        foreach ($entry in $topServices) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
+        $tableBlocks.Add("$html</table></div>")
     }
-    $appServiceRowHtml = ""
-    if ($topAppsHtml -or $topServicesHtml) {
-        $appServiceRowHtml = "<div class='chart-row'>$topAppsHtml$topServicesHtml</div>"
+    if ($topTypes) {
+        $html = "<div><div class='pie-chart-title'>Most common finding types</div><table><tr><th>Type</th><th>Count</th></tr>"
+        foreach ($entry in $topTypes) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
+        $tableBlocks.Add("$html</table></div>")
+    }
+    if ($topRulesByFindings) {
+        $html = "<div><div class='pie-chart-title'>Rules with the most findings</div><table><tr><th>Rule</th><th>Finding count</th></tr>"
+        foreach ($entry in $topRulesByFindings) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
+        $tableBlocks.Add("$html</table></div>")
+    }
+    if ($topTags) {
+        $html = "<div><div class='pie-chart-title'>Most common tags</div><table><tr><th>Tag</th><th>Rule count</th></tr>"
+        foreach ($entry in $topTags) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
+        $tableBlocks.Add("$html</table></div>")
     }
 
-    $statsHtmlBlock = $statCardsHtml + $chartsHtml + $appServiceRowHtml
+    $tableRowsHtml = ""
+    $tablesPerRow = 5
+    for ($i = 0; $i -lt $tableBlocks.Count; $i += $tablesPerRow) {
+        $rowContent = ""
+        for ($j = $i; $j -lt [Math]::Min($i + $tablesPerRow, $tableBlocks.Count); $j++) {
+            $rowContent += $tableBlocks[$j]
+        }
+        $tableRowsHtml += "<div class='chart-row'>$rowContent</div>"
+    }
+
+    $statsHtmlBlock = $statCardsHtml + $chartsHtml + $tableRowsHtml
     $statsBytes = [System.Text.Encoding]::UTF8.GetBytes($statsHtmlBlock)
     $lines += "%%RAWHTML_BASE64%%$([System.Convert]::ToBase64String($statsBytes))"
     $lines += ""
 
-    $lines += "## Algorithmic-based Findings"
-    $lines += ""
-    $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile | Type | Detail |"
-    $lines += "|---|---|---|---|---|---|---|---|---|---|"
+    # -------- Comparison with Previous Report (optional) --------
+    $comparison = $null
+    if ($CompareToPath) {
+        $previousFindings = Import-PreviousFindings -Path $CompareToPath
+        if ($previousFindings) {
+            $comparison = Get-FindingsComparison -CurrentFindings $Findings -PreviousFindings $previousFindings
+
+            $lines += "## Comparison with Previous Report"
+            $lines += ""
+            $lines += "Compared against: ``$CompareToPath``"
+            $lines += ""
+
+            $compareCardsHtml = "<div class='stat-grid'>"
+            $compareCardsHtml += "<div class='stat-card'><div class='stat-value'>$($comparison.New.Count)</div><div class='stat-label'>New findings</div></div>"
+            $compareCardsHtml += "<div class='stat-card'><div class='stat-value'>$($comparison.Resolved.Count)</div><div class='stat-label'>Resolved findings</div></div>"
+            $compareCardsHtml += "<div class='stat-card'><div class='stat-value'>$($comparison.Persistent.Count)</div><div class='stat-label'>Still present</div></div>"
+            $compareCardsHtml += "</div>"
+            $compareBytes = [System.Text.Encoding]::UTF8.GetBytes($compareCardsHtml)
+            $lines += "%%RAWHTML_BASE64%%$([System.Convert]::ToBase64String($compareBytes))"
+            $lines += ""
+            $lines += "New, resolved, and still-present findings are marked in the Comparison column of the table below."
+            $lines += ""
+        }
+    }
+
+    # Build one unified, render-ready row list rather than keeping the
+    # comparison as separate New/Resolved tables: a finding that's
+    # "Resolved" no longer has a row in $Findings at all (the rule that
+    # caused it may not even exist anymore), so its columns come straight
+    # from the previous run's CSV instead of $ruleLookup, which only
+    # knows about this run's rules. Both shapes get normalized into the
+    # same row structure here so one table and one sort can cover all of
+    # it, keeping severity order intact across current AND resolved rows
+    # together instead of dumping resolved ones at the end regardless of
+    # how severe they were.
+    $newKeys = @{}
+    if ($comparison) {
+        foreach ($f in $comparison.New) { $newKeys["$($f.RuleName)|$($f.Type)"] = $true }
+    }
+    $renderRows = New-Object System.Collections.Generic.List[PSCustomObject]
     foreach ($f in $sorted) {
         $ctx = $ruleLookup[$f.RuleName]
-        $src = if ($ctx) { $ctx.Src } else { "" }
-        $dst = if ($ctx) { $ctx.Dst } else { "" }
-        $app = if ($ctx) { $ctx.Application } else { "" }
-        $svc = if ($ctx) { $ctx.Service } else { "" }
-        $action = if ($ctx) { $ctx.Action } else { "" }
-        $profile = if ($ctx) { $ctx.Profile } else { "" }
-        $lines += "| $($f.Severity) | $($f.RuleName) | $src | $dst | $app | $svc | $action | $profile | $($f.Type) | $($f.Detail) |"
+        $compareTag = ""
+        if ($comparison) {
+            $key = "$($f.RuleName)|$($f.Type)"
+            $compareTag = if ($newKeys.ContainsKey($key)) { "New" } else { "Still present" }
+        }
+        $renderRows.Add([PSCustomObject]@{
+            Severity = $f.Severity; Rule = $f.RuleName
+            Src      = if ($ctx) { $ctx.Src } else { "" }
+            Dst      = if ($ctx) { $ctx.Dst } else { "" }
+            App      = if ($ctx) { $ctx.Application } else { "" }
+            Svc      = if ($ctx) { $ctx.Service } else { "" }
+            Action   = if ($ctx) { $ctx.Action } else { "" }
+            Profile  = if ($ctx) { $ctx.Profile } else { "" }
+            Type     = $f.Type; Detail = $f.Detail; Compare = $compareTag
+        })
+    }
+    if ($comparison) {
+        foreach ($f in $comparison.Resolved) {
+            $renderRows.Add([PSCustomObject]@{
+                Severity = $f.Severity; Rule = $f.Rule
+                Src      = $f.Source; Dst = $f.Destination; App = $f.Application; Svc = $f.Service
+                Action   = $f.Action; Profile = $f.Profile
+                Type     = $f.Type; Detail = $f.Detail; Compare = "Resolved"
+            })
+        }
+        # Stable sort: within the same severity, current-run rows (already
+        # in their existing order, any_any_any_allow pinned first among
+        # them) stay ahead of resolved ones added just above, rather than
+        # shuffling the whole table.
+        $renderRows = [System.Collections.Generic.List[PSCustomObject]]@($renderRows | Sort-Object { $SeverityOrder[$_.Severity] })
+    }
+
+    $lines += "## Algorithmic-based Findings"
+    $lines += ""
+    if ($comparison) {
+        $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile | Type | Detail | Comparison |"
+        $lines += "|---|---|---|---|---|---|---|---|---|---|---|"
+        foreach ($r in $renderRows) {
+            $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) | $($r.Type) | $($r.Detail) | $($r.Compare) |"
+        }
+    }
+    else {
+        $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile | Type | Detail |"
+        $lines += "|---|---|---|---|---|---|---|---|---|---|"
+        foreach ($r in $renderRows) {
+            $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) | $($r.Type) | $($r.Detail) |"
+        }
     }
 
     $sortedInventory = $Inventory
@@ -445,6 +695,8 @@ function ConvertTo-ReportHtml {
   .filter-status button:hover { background: #e5e5e5; }
   .action-allow { color: #1a7a1a; font-weight: bold; }
   .action-deny { color: #b02a2a; font-weight: bold; }
+  .compare-new { color: #b06a1a; font-weight: bold; }
+  .compare-resolved { color: #1a7a1a; font-weight: bold; }
   .stat-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0 20px 0; }
   .stat-card { background: #f7f7f7; border: 1px solid #ddd; border-radius: 6px; padding: 10px 16px; min-width: 130px; }
   .stat-card .stat-value { font-size: 22px; font-weight: bold; color: #1a1a1a; }
@@ -523,6 +775,7 @@ function clearMooseFilters(button) {
                 # cell, plus a clear-filters button and a visible-row count.
                 $addFilters = $currentSectionHeading -ne "Summary"
                 $actionColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "action")
+                $compareColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "comparison")
                 $htmlLines.Add("<table>")
                 $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th>$_</th>" }) -join "") + "</tr>")
                 if ($addFilters) {
@@ -546,6 +799,12 @@ function clearMooseFilters(button) {
                         $actionLower = $cells[$c].Trim().ToLower()
                         if ($actionLower -eq "allow") { "<td><span class='action-allow'>$($cells[$c])</span></td>" }
                         elseif ($actionLower -eq "deny" -or $actionLower -eq "drop") { "<td><span class='action-deny'>$($cells[$c])</span></td>" }
+                        else { "<td>$($cells[$c])</td>" }
+                    }
+                    elseif ($c -eq $compareColumnIndex) {
+                        $compareLower = $cells[$c].Trim().ToLower()
+                        if ($compareLower -eq "new") { "<td><span class='compare-new'>$($cells[$c])</span></td>" }
+                        elseif ($compareLower -eq "resolved") { "<td><span class='compare-resolved'>$($cells[$c])</span></td>" }
                         else { "<td>$($cells[$c])</td>" }
                     }
                     else { "<td>$($cells[$c])</td>" }
