@@ -317,12 +317,12 @@ rather than assuming a clean schema:
   (skipping all active-risk checks) either way.
 
 **A note on PAN-OS/Panorama version differences**: the core schema
-(including the blank leading column) has now been confirmed against real
-exports from **PAN-OS 12**, **PAN-OS 11**, and **PAN-OS 10**.
+(including the blank leading column) has been confirmed against real
+exports from **PAN-OS 10**, **PAN-OS 11**, and **PAN-OS 12**.
 `rules_paloalto_sample.csv` matches the PAN-OS 12 schema exactly. 
 Palo Alto's own documentation also confirms the core field names
 (Source Zone, Destination Zone, Application, etc.) have been stable
-across all these versions.
+across all the versions.
 
 If a different PAN-OS version renames a *column* outright, that's a
 distinct risk: a silent lookup miss would otherwise make the report look
@@ -332,13 +332,13 @@ Zone`, `Source Address`, `Destination Zone`, `Destination Address`,
 `Application`, `Service`, `Action`) right after loading and prints an
 explicit warning if any are missing, rather than failing silently.
 
-See `rules_paloalto_sample.csv` for a worked example covering every check.
+See `rules_paloalto_sample.csv` for a working example covering every check.
 For `zero_hit_count`, `stale_last_hit`, `rule_usage_unused`, and
 `rule_usage_partially_used` specifically, see `rules_usage_data_sample.csv`
 instead: a separate file with Hit Count/Last Hit/Rule Usage columns
 (from Policy Optimizer's rule usage view, a different export than the
 plain security rulebase, so kept out of the main sample to avoid
-misrepresenting its schema).
+misrepresenting its schema; see https://docs.paloaltonetworks.com/ngfw/administration/monitoring/view-policy-rule-usage)
 
 ## Address object / group resolution (optional)
 
