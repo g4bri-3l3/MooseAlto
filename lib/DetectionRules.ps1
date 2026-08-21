@@ -229,8 +229,34 @@ function Test-SideIsInternet {
 # --------------------------------------------------------------------------
 
 function Invoke-DeterministicChecks {
-    param([array]$Rules, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$StaleHitDays = 365)
+    param([array]$Rules, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25)
     $findings = @()
+
+    # Computed once, not per-rule: does the Options column actually carry
+    # logging information anywhere in this ruleset? Some export types
+    # include the column but never populate it with logging detail at all,
+    # which would make every single rule look "unlogged" if checked
+    # naively. Confirming at least one real example exists first avoids
+    # that false-positive flood.
+    #
+    # Logging and forwarding are two genuinely separate PAN-OS settings:
+    # "Log at Session Start"/"Log at Session End" control whether a log
+    # entry is created AT ALL (stored locally on the firewall regardless
+    # of anything else), while a Log Forwarding profile only controls
+    # whether those already-created local logs also get sent to Panorama
+    # or an external destination. A rule with logging on but no forwarding
+    # profile still has a real, locally-queryable audit trail, so either
+    # signal alone is enough here: this check is about "does a record of
+    # this traffic exist anywhere," not "is it centralized."
+    $loggingPattern = "session start|session end"
+    $forwardingPattern = "log forwarding"
+    $anyRuleShowsLogging = $false
+    foreach ($r in $Rules) {
+        if ($r.HasOptionsColumn -and $r.Options -and $r.Options.ToLower() -match "$loggingPattern|$forwardingPattern") {
+            $anyRuleShowsLogging = $true
+            break
+        }
+    }
 
     $totalRules = $Rules.Count
     $ruleIndex = 0
@@ -381,8 +407,8 @@ function Invoke-DeterministicChecks {
         #
         # Checked in both the rule Name and Tags, not Tags alone: a rule
         # literally named "TEMP_ACCESS_11" or "POC-Integration-Test" with
-        # no tags set at all (a common pattern - our own demo data does
-        # exactly this) was previously invisible to this check entirely.
+        # no tags set at all is a common pattern (our own demo data does
+        # exactly this), and tags-only matching would miss it.
         #
         # Matched by exact token, not raw substring: splitting on the
         # common separators (-, _, space, .) first and comparing whole
@@ -442,6 +468,46 @@ function Invoke-DeterministicChecks {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "port_based_rule_missing_app_id"
                 Detail   = "Rule matches by port ($($rule.ServiceRaw)) with Application left as 'any', instead of a named App-ID.$extraNote Consider migrating to an explicit application for App-ID-based inspection."
+            }
+        }
+
+        # A rule can be just as hard to audit and maintain with 200
+        # individually-listed addresses as with a literal "any" - large
+        # enumerated lists are a common symptom of a whitelist that grew
+        # unchecked over time, and are easy to skip past in manual review
+        # since nothing about them LOOKS wide open the way "any" does.
+        # Several real-world firewall audit checklists specifically call
+        # this out as its own finding, distinct from the any/none-based
+        # checks elsewhere in this file.
+        if ($rule.Action -eq "allow") {
+            $srcCount = if ($null -eq $rule.SrcAddr) { 0 } else { $rule.SrcAddr.Count }
+            $dstCount = if ($null -eq $rule.DstAddr) { 0 } else { $rule.DstAddr.Count }
+            $oversizedSides = @()
+            if ($srcCount -gt $MaxAddressListSize) { $oversizedSides += "source ($srcCount addresses)" }
+            if ($dstCount -gt $MaxAddressListSize) { $oversizedSides += "destination ($dstCount addresses)" }
+            if ($oversizedSides.Count -gt 0) {
+                $findings += [PSCustomObject]@{
+                    RuleName = $rule.Name; Severity = "Medium"; Type = "oversized_address_list"
+                    Detail   = "Rule lists an unusually large number of individual addresses in $($oversizedSides -join ' and ') (threshold: $MaxAddressListSize). Large enumerated address lists are hard to audit, easy to accumulate stale entries in, and just as difficult to reason about as an unrestricted rule even though nothing here literally says 'any'. Consider consolidating into a CIDR range or address group, or confirming every entry is still needed."
+                }
+            }
+        }
+
+        # An allow rule with no logging at all leaves no trail if that
+        # traffic is ever involved in an incident. Only checked when the
+        # Options column both exists AND has been confirmed to actually
+        # carry logging information somewhere in this ruleset (see
+        # anyRuleShowsLogging below, computed once outside this loop):
+        # some export types don't include logging detail in this column at
+        # all, and flagging every single rule in that case would be a
+        # false-positive flood rather than a real finding.
+        if ($rule.Action -eq "allow" -and $rule.HasOptionsColumn -and $anyRuleShowsLogging) {
+            $optionsLower = $rule.Options.ToLower()
+            if ($optionsLower -notmatch "$loggingPattern|$forwardingPattern") {
+                $findings += [PSCustomObject]@{
+                    RuleName = $rule.Name; Severity = "Medium"; Type = "no_logging_enabled"
+                    Detail   = "Rule shows no evidence of logging enabled (neither log-at-session-start nor log-at-session-end, nor a Log Forwarding profile). If this traffic is ever involved in an incident, there's no record of it having occurred. Verify logging is intentionally disabled here, not an oversight."
+                }
             }
         }
 
@@ -710,7 +776,7 @@ function Invoke-DeterministicChecks {
     # candidates that could plausibly match - not every earlier rule
     # unconditionally. On a ruleset spanning many distinct zones (the
     # normal case at real-world scale), most rule PAIRS have incompatible
-    # zones and were previously being compared anyway; this is what turns
+    # zones, so skipping those comparisons entirely is what turns
     # the effective cost from O(n^2) into roughly O(n x average bucket
     # size), which is much smaller when zones are varied.
     $enabledAllow = @($Rules | Where-Object { -not $_.Disabled -and $_.Action -eq "allow" })
@@ -951,4 +1017,3 @@ function Build-InternetExposureInventory {
     }
     return $inventory
 }
-
