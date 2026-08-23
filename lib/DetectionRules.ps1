@@ -273,6 +273,41 @@ function Invoke-DeterministicChecks {
             }
             continue
         }
+        # A rule named as if it denies/blocks something but is actually
+        # configured to allow it (or vice versa) is a dangerous, easy
+        # mistake to miss on a quick read: whoever reviews the ruleset
+        # later sees "DENY_..." and reasonably assumes that traffic is
+        # blocked, when it's actually permitted. Checked here, BEFORE the
+        # action=allow gate below, since it's the one check in this
+        # function that specifically needs to see deny/drop rules too -
+        # everything after this gate assumes allow.
+        #
+        # Matched by exact token (same tokenization as the temp/POC check
+        # further down), not raw substring, to avoid a false positive on
+        # a name that merely contains one of these words as part of a
+        # longer word. Rules where the name contains BOTH a deny-style and
+        # an allow-style token are skipped rather than guessed at, since
+        # the naming intent itself is ambiguous there, not clearly
+        # contradicted.
+        $nameTokensForAction = @($rule.Name -split '[-_\s\.]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
+        $denyIntentWords = @("deny", "block", "drop", "reject")
+        $allowIntentWords = @("allow", "permit", "accept")
+        $hasDenyIntent = ($denyIntentWords | Where-Object { $nameTokensForAction -contains $_ }).Count -gt 0
+        $hasAllowIntent = ($allowIntentWords | Where-Object { $nameTokensForAction -contains $_ }).Count -gt 0
+        $actionLowerForName = $rule.Action.ToLower()
+        if ($hasDenyIntent -and -not $hasAllowIntent -and $actionLowerForName -eq "allow") {
+            $findings += [PSCustomObject]@{
+                RuleName = $rule.Name; Severity = "High"; Type = "rule_name_action_mismatch"
+                Detail   = "Rule name suggests it denies/blocks traffic, but Action is actually '$($rule.Action)'. Anyone reading the ruleset by name alone would reasonably assume this traffic is blocked when it isn't. Verify whether the name is stale (rule was toggled without renaming) or the action was set incorrectly."
+            }
+        }
+        elseif ($hasAllowIntent -and -not $hasDenyIntent -and ($actionLowerForName -eq "deny" -or $actionLowerForName -eq "drop")) {
+            $findings += [PSCustomObject]@{
+                RuleName = $rule.Name; Severity = "High"; Type = "rule_name_action_mismatch"
+                Detail   = "Rule name suggests it allows/permits traffic, but Action is actually '$($rule.Action)'. Anyone reading the ruleset by name alone would reasonably assume this traffic is permitted when it isn't. Verify whether the name is stale (rule was toggled without renaming) or the action was set incorrectly."
+            }
+        }
+
         if ($rule.Action -ne "allow") { continue }
 
         $srcIsInet = Test-SideIsInternet -Zones $rule.SrcZone -AddrTokens $rule.SrcAddr -InternetZoneSet $InternetZoneSet
