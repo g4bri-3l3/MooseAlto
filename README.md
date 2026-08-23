@@ -517,14 +517,14 @@ unconditionally.
 ## Usage
 
 ```powershell
-$env:GEMINI_API_KEY = "..."   # only needed if you plan to say yes to the AI prompt
+$env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
 
 .\MooseAlto.ps1 -InputCsv export.csv -OutHtml report.html -OutCsv report.csv
 
-# Different zone naming convention (default: untrust,internet,outside,external)?
+# Different zone naming convention (default: untrust,internet,outside,external):
 .\MooseAlto.ps1 -InputCsv export.csv -OutHtml report.html -OutCsv report.csv -InternetZones "untrust,wan"
 
-# Financial services: flag unrestricted access into sensitive zones
+# Financial services: flag unrestricted access into sensitive zones.
 # (SWIFT secure zone, CDE, ATM, core banking, HSM: name your own zones):
 .\MooseAlto.ps1 -InputCsv export.csv -OutHtml report.html -OutCsv report.csv -CriticalZones "swift,cde,atm,core-banking,hsm"
 
