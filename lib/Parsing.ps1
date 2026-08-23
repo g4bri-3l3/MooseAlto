@@ -87,17 +87,64 @@ function Repair-DoubleWrappedCsvLine {
     return ($trimmed -replace '""', '"')
 }
 
+function Remove-BomNoise {
+    # Strips a literal UTF-8 BOM character, and also a corrupted/mojibake
+    # BOM: the 3 raw BOM bytes (EF BB BF) misread as Latin-1/CP1252 text
+    # and re-saved as UTF-8, which decodes back to 3 separate visible
+    # characters (U+00EF, U+00BB, U+00BF) instead of the single invisible
+    # BOM codepoint. Built from explicit char codes rather than typing the
+    # glyphs directly, since a literal string in the script source risks
+    # an encoding mismatch with how PowerShell's own parser reads this
+    # .ps1 file, which a byte-exact comparison can't afford. Seen at the
+    # very start of a real export, and also re-exposed mid-string after
+    # peeling back one layer of the double-wrap below, when the two
+    # corruptions stack on the same line.
+    param([string]$Text)
+    $Text = $Text.TrimStart([char]0xFEFF)
+    $mojibakeBom = [string]([char]0xEF) + [string]([char]0xBB) + [string]([char]0xBF)
+    if ($Text.StartsWith($mojibakeBom)) { $Text = $Text.Substring(3) }
+    return $Text
+}
+
 function Get-CsvFileContent {
-    # Reads a CSV file's full text, strips the UTF-8 BOM if present, and
-    # transparently repairs the double-quote-wrapping issue above when
-    # detected on the first line (its signature: starting with '",', the
-    # same "blank leading column" pattern already expected, just wrapped
-    # in one more layer of quoting).
+    # Reads a CSV file's full text, strips a UTF-8 BOM (including the
+    # corrupted/mojibake form, see Remove-BomNoise), and transparently
+    # repairs the double-quote-wrapping issue above when detected on the
+    # first line (its signature: a doubled-empty-quote for the blank
+    # leading column, immediately followed by a comma - "any-noise-then-
+    # empty-quote" rather than a strict prefix check, since the mojibake
+    # BOM can sit between the wrapping quote and that signature instead
+    # of always being cleanly at position 0).
+    #
+    # Applied in a loop, not just once: on at least one real export, the
+    # header line specifically (not the data rows) was wrapped TWICE, with
+    # a re-exposed mojibake BOM sitting between the two layers. A single
+    # fixed pass silently left it half-unwrapped, which produced a
+    # confidently wrong report (garbage column names read as "any"/blank,
+    # not an error) rather than failing loudly, so this can't be treated
+    # as a one-shot fix.
     param([string]$Path)
-    $rawContent = (Get-Content -Path $Path -Raw) -replace [char]0xFEFF, ''
+    $rawContent = Get-Content -Path $Path -Raw
+    $rawContent = Remove-BomNoise -Text $rawContent
     $lines = $rawContent -split "`r?`n"
-    if ($lines.Count -gt 0 -and $lines[0].StartsWith('",')) {
-        $lines = $lines | ForEach-Object { Repair-DoubleWrappedCsvLine -Line $_ }
+    if ($lines.Count -gt 0) {
+        # A short run of junk before the first comma is enough to suggest
+        # a wrapped leading field (whether that's a bare "," or a
+        # corrupted-BOM-then-quoted-empty-field "ï»¿"","), but that prefix
+        # alone isn't a safe enough signal on its own: a perfectly normal,
+        # unwrapped CSV that happens to start with a short quoted value
+        # (e.g. "ID",Name,...) would match it too. Requiring several ""
+        # pairs elsewhere in the same line is what actually distinguishes
+        # "this whole line got double-quote-wrapped" from a coincidence.
+        $wrapPrefix = '^"[^,]{0,10}?,'
+        $passes = 0
+        while ($passes -lt 5) {
+            $probe = Remove-BomNoise -Text $lines[0]
+            $looksWrapped = ($probe -match $wrapPrefix) -and (([regex]::Matches($probe, '""')).Count -ge 5)
+            if (-not $looksWrapped) { break }
+            $lines = $lines | ForEach-Object { Repair-DoubleWrappedCsvLine -Line (Remove-BomNoise -Text $_) }
+            $passes++
+        }
     }
     return ($lines -join "`r`n")
 }
