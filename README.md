@@ -230,9 +230,7 @@ DNS-based security controls, not because it's insecure).
 pop3, imap, snmp, ldap, ms-rdp, ms-sql-db, mysql, oracle, vnc, ms-ds-smb/smb,
 rsh, rlogin, pptp, postgres, redis, mongodb, elasticsearch-base, anydesk,
 teamviewer, logmein, logmein-gotomypc, splashtop, chrome-remote-desktop,
-dns-over-https. **Verify these names against your own App-ID database.**
-A few (rlogin/rsh/pptp, the modern data-store apps) are lower-confidence
-guesses and can be renamed/added across content-pack updates.
+dns-over-https. **Verify these names against App-ID database (https://applipedia.paloaltonetworks.com/).**
 
 ## Comparing against a previous report
 
