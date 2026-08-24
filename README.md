@@ -44,9 +44,7 @@ Also, in
 ## Design principle
 
 Anything with an exact & algorithmic answer is checked **in local**, not forwarded
-to an LLM. There's no reason to risk a hallucinated answer on something
-that's computable (a rule either matches "any-any-any" or it doesn't). The
-LLM is only used, optionally **(if you decide so)**, 
+to an LLM. The LLM is only used, optionally **(if you decide so)**, 
 to write an executive-readable summary and suggest a remediation order over
 findings that were already computed (**with IP addresses and other data masked**).
 
