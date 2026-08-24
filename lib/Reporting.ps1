@@ -28,50 +28,46 @@ function Protect-IPAddresses {
 $SeverityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
 
 function Get-SvgPieChart {
-    # Dependency-free pie chart: plain SVG computed from arc trigonometry,
-    # no charting library. Parallel arrays instead of a hashtable so slice
-    # order is exactly what the caller specifies (hashtable enumeration
-    # order isn't guaranteed in PowerShell, which would make the legend
-    # and slice order shuffle between runs on the same data).
-    param([string[]]$Labels, [int[]]$Values, [string[]]$Colors, [int]$Size = 170)
+    # Dependency-free donut chart: plain SVG, no charting library. Drawn
+    # as concentric ring strokes with stroke-dasharray/-dashoffset (each
+    # segment is a dash-length slice of the circle's circumference)
+    # rather than arc-path trigonometry - simpler to compute and the same
+    # technique produces the center hole for free, which a filled pie
+    # can't do without a second masking shape.
+    #
+    # Parallel arrays instead of a hashtable so slice order is exactly
+    # what the caller specifies (hashtable enumeration order isn't
+    # guaranteed in PowerShell, which would make the legend and slice
+    # order shuffle between runs on the same data).
+    param([string[]]$Labels, [int[]]$Values, [string[]]$Colors, [int]$Size = 130, [string]$CenterLabel = "")
 
     $total = ($Values | Measure-Object -Sum).Sum
     if ($total -le 0) { return "<p style='color:#888;font-size:12px;'>No data.</p>" }
 
     $cx = $Size / 2
     $cy = $Size / 2
-    $r = ($Size / 2) - 4
+    $strokeWidth = [Math]::Round($Size * 0.13, 1)
+    $r = ($Size / 2) - ($strokeWidth / 2) - 1
+    $circumference = [Math]::Round(2 * [Math]::PI * $r, 2)
 
-    $slices = ""
+    $rings = "<circle cx='$cx' cy='$cy' r='$r' fill='none' stroke='#ECE9E4' stroke-width='$strokeWidth' />"
     $legend = ""
     $cumulative = 0
     for ($i = 0; $i -lt $Labels.Count; $i++) {
         $value = $Values[$i]
         if ($value -le 0) { continue }
         $color = $Colors[$i]
-        $startAngle = ($cumulative / $total) * 360
-        $cumulative += $value
-        $endAngle = ($cumulative / $total) * 360
-
-        if ($value -eq $total) {
-            # A single 100% category can't be drawn as a zero-length arc;
-            # a plain circle is the correct (and simpler) shape for it.
-            $slices += "<circle cx='$cx' cy='$cy' r='$r' fill='$color' />"
-        }
-        else {
-            $startRad = $startAngle * [Math]::PI / 180
-            $endRad = $endAngle * [Math]::PI / 180
-            $x1 = [Math]::Round($cx + $r * [Math]::Sin($startRad), 2)
-            $y1 = [Math]::Round($cy - $r * [Math]::Cos($startRad), 2)
-            $x2 = [Math]::Round($cx + $r * [Math]::Sin($endRad), 2)
-            $y2 = [Math]::Round($cy - $r * [Math]::Cos($endRad), 2)
-            $largeArc = if (($endAngle - $startAngle) -gt 180) { 1 } else { 0 }
-            $slices += "<path d='M $cx,$cy L $x1,$y1 A $r,$r 0 $largeArc,1 $x2,$y2 Z' fill='$color' />"
-        }
+        $segLen = [Math]::Round(($value / $total) * $circumference, 2)
+        $offset = [Math]::Round(-1 * $cumulative, 2)
+        $rings += "<circle cx='$cx' cy='$cy' r='$r' fill='none' stroke='$color' stroke-width='$strokeWidth' stroke-dasharray='$segLen $circumference' stroke-dashoffset='$offset' />"
+        $cumulative += $segLen
         $pct = [Math]::Round(($value / $total) * 100, 1)
         $legend += "<div class='pie-legend-item'><span class='pie-legend-swatch' style='background:$color'></span>$($Labels[$i]) ($value, $pct%)</div>"
     }
-    return "<div class='pie-chart-wrap'><svg viewBox='0 0 $Size $Size' width='$Size' height='$Size'>$slices</svg><div class='pie-legend'>$legend</div></div>"
+    # Rotated so the first segment starts at 12 o'clock instead of 3
+    # o'clock, matching where a reader's eye naturally lands first.
+    $donut = "<svg viewBox='0 0 $Size $Size' width='$Size' height='$Size'><g transform='rotate(-90 $cx $cy)'>$rings</g><text x='$cx' y='$($cy - 2)' text-anchor='middle' font-size='20' font-weight='600' fill='#2B2A28'>$total</text><text x='$cx' y='$($cy + 14)' text-anchor='middle' font-size='9' fill='#6B655C'>$CenterLabel</text></svg>"
+    return "<div class='pie-chart-wrap'>$donut<div class='pie-legend'>$legend</div></div>"
 }
 
 function Import-PreviousFindings {
@@ -347,18 +343,26 @@ function Get-ReportLines {
     $statCardsHtml += "<div class='stat-card'><div class='stat-value'>$noTagCount</div><div class='stat-label'>Rules with no tags</div></div>"
     $statCardsHtml += "</div>"
 
-    $severityPie = Get-SvgPieChart -Labels @("Critical", "High", "Medium", "Low") -Values @($critCount, $highCount, $medCount, $lowCount) -Colors @("#B33A3A", "#C1793A", "#D4A017", "#ADA79C")
-    $directionPie = Get-SvgPieChart -Labels @("Inbound", "Outbound", "Both sides", "Internal only") -Values @($inboundCount, $outboundCount, $bothCount, $internalCount) -Colors @("#A6720F", "#6B8F5E", "#8A6BAE", "#ADA79C")
-    $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#A6720F", "#C1793A", "#B33A3A")
+    $severityPie = Get-SvgPieChart -Labels @("Critical", "High", "Medium", "Low") -Values @($critCount, $highCount, $medCount, $lowCount) -Colors @("#B33A3A", "#C1793A", "#D4A017", "#ADA79C") -CenterLabel "findings"
+    $directionPie = Get-SvgPieChart -Labels @("Inbound", "Outbound", "Both sides", "Internal only") -Values @($inboundCount, $outboundCount, $bothCount, $internalCount) -Colors @("#A6720F", "#6B8F5E", "#8A6BAE", "#ADA79C") -CenterLabel "allow rules"
+    $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#A6720F", "#C1793A", "#B33A3A") -CenterLabel "allow rules"
+
+    # Small hand-drawn inline icons (shield / exchange / lock), not an
+    # icon font: MooseAlto's whole pitch is "no network calls unless you
+    # opt into the Gemini step," so a webfont/CDN icon set would
+    # contradict that even for something this cosmetic.
+    $iconShield = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><path d='M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z'/></svg>"
+    $iconExchange = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><path d='M7 3l4 4-4 4M3 7h8M17 21l-4-4 4-4M21 17h-8'/></svg>"
+    $iconLock = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><rect x='4' y='11' width='16' height='9' rx='1'/><path d='M8 11V7a4 4 0 018 0v4'/></svg>"
 
     # All three pies together in one row rather than splitting the
     # App-ID/port one off into its own row further down: three distribution
     # charts belong next to each other, and a lone chart in its own
     # full-width row was wasting most of that row's horizontal space.
     $chartsHtml = "<div class='chart-row'>"
-    $chartsHtml += "<div><div class='pie-chart-title'>Findings by severity</div>$severityPie</div>"
-    $chartsHtml += "<div><div class='pie-chart-title'>Allow rules by direction</div>$directionPie</div>"
-    $chartsHtml += "<div><div class='pie-chart-title'>Allow rules: App-ID vs port-based matching</div>$appIdPie</div>"
+    $chartsHtml += "<div><div class='pie-chart-title'>${iconShield}Findings by severity</div>$severityPie</div>"
+    $chartsHtml += "<div><div class='pie-chart-title'>${iconExchange}Allow rules by direction</div>$directionPie</div>"
+    $chartsHtml += "<div><div class='pie-chart-title'>${iconLock}Allow rules: App-ID vs port-based matching</div>$appIdPie</div>"
     $chartsHtml += "</div>"
 
     # Each of these is its own self-contained block, built independently
@@ -372,29 +376,29 @@ function Get-ReportLines {
     $tableBlocks = New-Object System.Collections.Generic.List[string]
 
     if ($topApps) {
-        $html = "<div><div class='pie-chart-title'>Most common applications (allow rules)</div><table><tr><th>Application</th><th>Rule count</th></tr>"
+        $html = "<div><div class='pie-chart-title'>Most common applications (allow rules)</div><div class='table-wrap'><table><tr><th>Application</th><th>Rule count</th></tr>"
         foreach ($entry in $topApps) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
-        $tableBlocks.Add("$html</table></div>")
+        $tableBlocks.Add("$html</table></div></div>")
     }
     if ($topServices) {
-        $html = "<div><div class='pie-chart-title'>Most common services (allow rules, no App-ID)</div><table><tr><th>Service</th><th>Rule count</th></tr>"
+        $html = "<div><div class='pie-chart-title'>Most common services (allow rules, no App-ID)</div><div class='table-wrap'><table><tr><th>Service</th><th>Rule count</th></tr>"
         foreach ($entry in $topServices) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
-        $tableBlocks.Add("$html</table></div>")
+        $tableBlocks.Add("$html</table></div></div>")
     }
     if ($topTypes) {
-        $html = "<div><div class='pie-chart-title'>Most common finding types</div><table><tr><th>Type</th><th>Count</th></tr>"
+        $html = "<div><div class='pie-chart-title'>Most common finding types</div><div class='table-wrap'><table><tr><th>Type</th><th>Count</th></tr>"
         foreach ($entry in $topTypes) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
-        $tableBlocks.Add("$html</table></div>")
+        $tableBlocks.Add("$html</table></div></div>")
     }
     if ($topRulesByFindings) {
-        $html = "<div><div class='pie-chart-title'>Rules with the most findings</div><table><tr><th>Rule</th><th>Finding count</th></tr>"
+        $html = "<div><div class='pie-chart-title'>Rules with the most findings</div><div class='table-wrap'><table><tr><th>Rule</th><th>Finding count</th></tr>"
         foreach ($entry in $topRulesByFindings) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
-        $tableBlocks.Add("$html</table></div>")
+        $tableBlocks.Add("$html</table></div></div>")
     }
     if ($topTags) {
-        $html = "<div><div class='pie-chart-title'>Most common tags</div><table><tr><th>Tag</th><th>Rule count</th></tr>"
+        $html = "<div><div class='pie-chart-title'>Most common tags</div><div class='table-wrap'><table><tr><th>Tag</th><th>Rule count</th></tr>"
         foreach ($entry in $topTags) { $html += "<tr><td>$($entry.Name)</td><td>$($entry.Value)</td></tr>" }
-        $tableBlocks.Add("$html</table></div>")
+        $tableBlocks.Add("$html</table></div></div>")
     }
 
     $tableRowsHtml = ""
@@ -697,14 +701,18 @@ function ConvertTo-ReportHtml {
   h1 { border-bottom: 3px solid var(--gold); padding-bottom: 10px; }
   h2 { margin: 0; color: var(--slate); }
   h3 { margin-top: 20px; color: var(--slate); }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 12px; }
-  th, td { border: 1px solid var(--border); padding: 7px 9px; text-align: left; vertical-align: top; }
-  th { background: var(--slate); color: var(--paper); font-weight: 600; letter-spacing: 0.01em; }
-  tr.data-row:hover td { background: #FBF9F5; }
-  tr.severity-critical td:first-child { background: var(--critical-bg); color: var(--critical); font-weight: bold; border-left: 3px solid var(--critical); }
-  tr.severity-high td:first-child { background: var(--high-bg); color: var(--high); font-weight: bold; border-left: 3px solid var(--high); }
-  tr.severity-medium td:first-child { background: var(--medium-bg); color: #8A6B14; border-left: 3px solid var(--medium); }
-  tr.severity-low td:first-child { background: var(--low-bg); color: var(--muted); border-left: 3px solid var(--low); }
+  .table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 12px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 0; }
+  th, td { padding: 8px 10px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
+  tr:first-child > th { border-top: none; }
+  th { background: var(--slate); color: var(--paper); font-weight: 600; letter-spacing: 0.01em; border-top: none; }
+  tr.data-row:nth-child(even) td { background: #FBF9F5; }
+  tr.data-row:hover td { background: var(--gold-tint); }
+  .sev-pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 99px; }
+  .sev-pill-critical { background: var(--critical-bg); color: #8A2A2A; }
+  .sev-pill-high { background: var(--high-bg); color: #8A4E17; }
+  .sev-pill-medium { background: var(--medium-bg); color: #8A6B14; }
+  .sev-pill-low { background: var(--low-bg); color: #5A564F; }
   blockquote { background: var(--gold-tint); border-left: 4px solid var(--gold); margin: 12px 0; padding: 10px 14px; }
   code { background: #F1EEE7; padding: 1px 5px; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: 0.92em; }
   .moose-logo { font-family: Consolas, 'Courier New', monospace; font-size: 10px; line-height: 1.1; color: var(--gold); white-space: pre; float: right; margin: 0 0 10px 20px; }
@@ -808,7 +816,7 @@ function clearMooseFilters(button) {
                 $addFilters = $currentSectionHeading -ne "Summary"
                 $actionColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "action")
                 $compareColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "comparison")
-                $htmlLines.Add("<table>")
+                $htmlLines.Add("<div class='table-wrap'><table>")
                 $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th>$_</th>" }) -join "") + "</tr>")
                 if ($addFilters) {
                     $filterCells = ($cells | ForEach-Object { "<td><input type='text' oninput='filterMooseTable(this)' placeholder='Filter...'></td>" }) -join ""
@@ -820,14 +828,18 @@ function clearMooseFilters(button) {
             }
             else {
                 $rowClass = "data-row"
+                $severityPillClass = ""
                 switch ($cells[0]) {
-                    "Critical" { $rowClass += " severity-critical" }
-                    "High"     { $rowClass += " severity-high" }
-                    "Medium"   { $rowClass += " severity-medium" }
-                    "Low"      { $rowClass += " severity-low" }
+                    "Critical" { $severityPillClass = "sev-pill-critical" }
+                    "High"     { $severityPillClass = "sev-pill-high" }
+                    "Medium"   { $severityPillClass = "sev-pill-medium" }
+                    "Low"      { $severityPillClass = "sev-pill-low" }
                 }
                 $cellsHtml = for ($c = 0; $c -lt $cells.Count; $c++) {
-                    if ($c -eq $actionColumnIndex) {
+                    if ($c -eq 0 -and $severityPillClass) {
+                        "<td><span class='sev-pill $severityPillClass'>$($cells[$c])</span></td>"
+                    }
+                    elseif ($c -eq $actionColumnIndex) {
                         $actionLower = $cells[$c].Trim().ToLower()
                         if ($actionLower -eq "allow") { "<td><span class='action-allow'>$($cells[$c])</span></td>" }
                         elseif ($actionLower -eq "deny" -or $actionLower -eq "drop") { "<td><span class='action-deny'>$($cells[$c])</span></td>" }
@@ -846,7 +858,7 @@ function clearMooseFilters(button) {
             continue
         }
         elseif ($inTable) {
-            $htmlLines.Add("</tbody></table>")
+            $htmlLines.Add("</tbody></table></div>")
             if ($tableHasFilters) { $htmlLines.Add("<div class='filter-status'><button type='button' onclick='clearMooseFilters(this)'>Clear filters</button> <span class='status-text'></span></div>") }
             $inTable = $false
         }
