@@ -283,14 +283,14 @@ addresses intact (local file only, **nothing leaves your machine at this
 point**). Only afterward does the script ask, interactively, whether to send
 anything to Gemini:
 
-1. **`Send the results (with IP addresses masked) to Gemini for additional
+1. `Send the results (with IP addresses masked) to Gemini for additional
    analysis? (Y/N)`**: if no, the script stops here. If yes, every IP
    address/CIDR found in the finding text is replaced with a consistent
    placeholder (`IP-MASKED-1`, `IP-MASKED-2`, ...) before anything is sent.
-2. **`Send all findings, or only internet-exposure-related ones? (A=All,
+2. `Send all findings, or only internet-exposure-related ones? (A=All,
    I=Internet)`**: lets you scope what Gemini sees: everything, or only
    the internet-facing categories.
-3. **`Also include rule Tags in the prompt sent to Gemini? They may contain
+3. `Also include rule Tags in the prompt sent to Gemini? They may contain
    sensitive information (Y/N)`**: Tags are free text written by whoever
    maintains the ruleset and could contain project codenames or internal
    notes; included only if you explicitly say yes.
@@ -330,7 +330,7 @@ rather than assuming a clean schema:
   displayed rule name, and the rule is correctly treated as disabled
   (skipping all active-risk checks) either way.
 
-**A note on PAN-OS/Panorama version differences**: the core schema
+**Note on PAN-OS/Panorama version differences**: the core schema
 (including the blank leading column) has been confirmed against real
 exports from **PAN-OS 10**, **PAN-OS 11**, and **PAN-OS 12**.
 `rules_paloalto_sample.csv` matches the PAN-OS 12 schema exactly. 
