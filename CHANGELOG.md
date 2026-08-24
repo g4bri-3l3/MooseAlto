@@ -5,6 +5,12 @@ All notable changes to MooseAlto are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [1.3] - 2026-08-24
+### Added
+- Created and Modified columns on the Algorithmic-based Findings table, Internet Exposure Inventory, and findings CSV export, shown only when the source CSV actually has them.
+### Changed
+- Report visual refresh: warm color palette, refined severity row styling, stat cards with a subtle accent border and shadow, and amber-toned section dividers.
+
 ## [1.2] - 2026-08-22
 ### Added
 rule_name_action_mismatch: flags a rule whose name suggests it denies/blocks traffic (contains a token like "deny", "block", "drop") but is actually configured to allow it, or vice versa (a name suggesting "allow"/"permit" on a rule that's actually deny/drop). A rule renamed or toggled without the other catching up is easy to miss on a quick read and easy to trust incorrectly. Matched by exact token, not substring; rules whose name contains both a deny-style and an allow-style token are skipped as ambiguous rather than guessed at.
