@@ -13,9 +13,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [1.2] - 2026-08-22
 ### Added
-rule_name_action_mismatch: flags a rule whose name suggests it denies/blocks traffic (contains a token like "deny", "block", "drop") but is actually configured to allow it, or vice versa (a name suggesting "allow"/"permit" on a rule that's actually deny/drop). A rule renamed or toggled without the other catching up is easy to miss on a quick read and easy to trust incorrectly. Matched by exact token, not substring; rules whose name contains both a deny-style and an allow-style token are skipped as ambiguous rather than guessed at.
+- rule_name_action_mismatch: flags a rule whose name suggests it denies/blocks traffic (contains a token like "deny", "block", "drop") but is actually configured to allow it, or vice versa (a name suggesting "allow"/"permit" on a rule that's actually deny/drop). A rule renamed or toggled without the other catching up is easy to miss on a quick read and easy to trust incorrectly. Matched by exact token, not substring; rules whose name contains both a deny-style and an allow-style token are skipped as ambiguous rather than guessed at.
 ### Fixed
-The double-quote-wrap CSV repair now applies iteratively instead of once. The repair now loops until the line no longer matches the wrapped signature, capped at 5 passes, with a second check (a minimum count of "" pairs in the line) to avoid misfiring on a normal, unwrapped CSV that happens to start with a short quoted field (this could be fired depending on witch device the export is done from).
+- The double-quote-wrap CSV repair now applies iteratively instead of once. The repair now loops until the line no longer matches the wrapped signature, capped at 5 passes, with a second check (a minimum count of "" pairs in the line) to avoid misfiring on a normal, unwrapped CSV that happens to start with a short quoted field (this could be fired depending on witch device the export is done from).
 
 ## [1.1] - 2026-08-21
 ### Added
