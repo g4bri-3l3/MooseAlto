@@ -161,8 +161,15 @@ function Get-ReportLines {
             Service     = $r.ServiceRaw
             Action      = $r.Action
             Profile     = if ($r.Profile) { $r.Profile } else { "none" }
+            Created     = $r.Created
+            Modified    = $r.Modified
         }
     }
+
+    # Created/Modified are shown as extra columns only when the export
+    # actually has them - most don't, and an empty column on every single
+    # row would just be noise.
+    $showCreatedModified = @($Rules | Where-Object { $_.HasCreatedColumn -or $_.HasModifiedColumn }).Count -gt 0
 
     # The any_any_any_allow finding itself is the broadest possible rule in
     # the ruleset. Pin just that row to the top, not every other finding
@@ -340,9 +347,9 @@ function Get-ReportLines {
     $statCardsHtml += "<div class='stat-card'><div class='stat-value'>$noTagCount</div><div class='stat-label'>Rules with no tags</div></div>"
     $statCardsHtml += "</div>"
 
-    $severityPie = Get-SvgPieChart -Labels @("Critical", "High", "Medium", "Low") -Values @($critCount, $highCount, $medCount, $lowCount) -Colors @("#d9534f", "#f0ad4e", "#f7d774", "#adb5bd")
-    $directionPie = Get-SvgPieChart -Labels @("Inbound", "Outbound", "Both sides", "Internal only") -Values @($inboundCount, $outboundCount, $bothCount, $internalCount) -Colors @("#5b8def", "#7bc67e", "#c77dd2", "#adb5bd")
-    $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#5b8def", "#f0ad4e", "#d9534f")
+    $severityPie = Get-SvgPieChart -Labels @("Critical", "High", "Medium", "Low") -Values @($critCount, $highCount, $medCount, $lowCount) -Colors @("#B33A3A", "#C1793A", "#D4A017", "#ADA79C")
+    $directionPie = Get-SvgPieChart -Labels @("Inbound", "Outbound", "Both sides", "Internal only") -Values @($inboundCount, $outboundCount, $bothCount, $internalCount) -Colors @("#A6720F", "#6B8F5E", "#8A6BAE", "#ADA79C")
+    $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#A6720F", "#C1793A", "#B33A3A")
 
     # All three pies together in one row rather than splitting the
     # App-ID/port one off into its own row further down: three distribution
@@ -460,6 +467,8 @@ function Get-ReportLines {
             Svc      = if ($ctx) { $ctx.Service } else { "" }
             Action   = if ($ctx) { $ctx.Action } else { "" }
             Profile  = if ($ctx) { $ctx.Profile } else { "" }
+            Created  = if ($ctx) { $ctx.Created } else { "" }
+            Modified = if ($ctx) { $ctx.Modified } else { "" }
             Type     = $f.Type; Detail = $f.Detail; Compare = $compareTag
         })
     }
@@ -469,6 +478,7 @@ function Get-ReportLines {
                 Severity = $f.Severity; Rule = $f.Rule
                 Src      = $f.Source; Dst = $f.Destination; App = $f.Application; Svc = $f.Service
                 Action   = $f.Action; Profile = $f.Profile
+                Created  = $f.Created; Modified = $f.Modified
                 Type     = $f.Type; Detail = $f.Detail; Compare = "Resolved"
             })
         }
@@ -479,21 +489,24 @@ function Get-ReportLines {
         $renderRows = [System.Collections.Generic.List[PSCustomObject]]@($renderRows | Sort-Object { $SeverityOrder[$_.Severity] })
     }
 
+    # Header/separator/rows are built once, with the two optional column
+    # groups (Created/Modified, Comparison) spliced in conditionally,
+    # rather than four near-duplicate hardcoded branches for every
+    # combination of "has compare data" x "has created/modified data".
     $lines += "## Algorithmic-based Findings"
     $lines += ""
-    if ($comparison) {
-        $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile | Type | Detail | Comparison |"
-        $lines += "|---|---|---|---|---|---|---|---|---|---|---|"
-        foreach ($r in $renderRows) {
-            $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) | $($r.Type) | $($r.Detail) | $($r.Compare) |"
-        }
-    }
-    else {
-        $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile | Type | Detail |"
-        $lines += "|---|---|---|---|---|---|---|---|---|---|"
-        foreach ($r in $renderRows) {
-            $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) | $($r.Type) | $($r.Detail) |"
-        }
+    $extraHeader = if ($showCreatedModified) { " Created | Modified |" } else { "" }
+    $compareHeader = if ($comparison) { " Comparison |" } else { "" }
+    $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile |$extraHeader Type | Detail |$compareHeader"
+    $sep = "|---|---|---|---|---|---|---|---|"
+    if ($showCreatedModified) { $sep += "---|---|" }
+    $sep += "---|---|"
+    if ($comparison) { $sep += "---|" }
+    $lines += $sep
+    foreach ($r in $renderRows) {
+        $extraVals = if ($showCreatedModified) { " $($r.Created) | $($r.Modified) |" } else { "" }
+        $compareVal = if ($comparison) { " $($r.Compare) |" } else { "" }
+        $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) |$extraVals $($r.Type) | $($r.Detail) |$compareVal"
     }
 
     $sortedInventory = $Inventory
@@ -506,10 +519,14 @@ function Get-ReportLines {
     $lines += ""
     $lines += "## Internet Exposure Inventory (all enabled allow rules touching the internet)"
     $lines += ""
-    $lines += "| Rule | Direction | Source | Destination | Application | Service | Action | Profile |"
-    $lines += "|---|---|---|---|---|---|---|---|"
+    $invExtraHeader = if ($showCreatedModified) { " Created | Modified |" } else { "" }
+    $lines += "| Rule | Direction | Source | Destination | Application | Service | Action | Profile |$invExtraHeader"
+    $invSep = "|---|---|---|---|---|---|---|---|"
+    if ($showCreatedModified) { $invSep += "---|---|" }
+    $lines += $invSep
     foreach ($r in $sortedInventory) {
-        $lines += "| $($r.RuleName) | $($r.Direction) | $($r.Src) | $($r.Dst) | $($r.Application) | $($r.Service) | $($r.Action) | $($r.Profile) |"
+        $invExtraVals = if ($showCreatedModified) { " $($r.Created) | $($r.Modified) |" } else { "" }
+        $lines += "| $($r.RuleName) | $($r.Direction) | $($r.Src) | $($r.Dst) | $($r.Application) | $($r.Service) | $($r.Action) | $($r.Profile) |$invExtraVals"
     }
 
     return $lines
@@ -662,48 +679,63 @@ function ConvertTo-ReportHtml {
 
     $css = @"
 <style>
-  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; color: #1a1a1a; }
-  h1 { border-bottom: 2px solid #333; padding-bottom: 8px; }
-  h2 { margin: 0; }
-  h3 { margin-top: 20px; }
+  :root {
+    --ink: #1C1917;
+    --paper: #FDFCFA;
+    --gold: #A6720F;
+    --gold-deep: #8A5D0A;
+    --gold-tint: #F3E6C8;
+    --slate: #2B2A28;
+    --border: #E4DFD5;
+    --muted: #6B655C;
+    --critical: #B33A3A; --critical-bg: #F7E3E1;
+    --high: #C1793A; --high-bg: #F8E8D6;
+    --medium: #B8901A; --medium-bg: #FAF0D4;
+    --low: #8A8580; --low-bg: #ECE9E4;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 40px; color: var(--ink); background: var(--paper); line-height: 1.45; }
+  h1 { border-bottom: 3px solid var(--gold); padding-bottom: 10px; }
+  h2 { margin: 0; color: var(--slate); }
+  h3 { margin-top: 20px; color: var(--slate); }
   table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 12px; }
-  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; vertical-align: top; }
-  th { background: #2d2d2d; color: white; }
-  tr.severity-critical td:first-child { background: #f8d7da; font-weight: bold; }
-  tr.severity-high td:first-child { background: #fde2c8; font-weight: bold; }
-  tr.severity-medium td:first-child { background: #fff3cd; }
-  tr.severity-low td:first-child { background: #e2e3e5; }
-  blockquote { background: #fff8e1; border-left: 4px solid #f0ad4e; margin: 12px 0; padding: 10px 14px; }
-  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-family: Consolas, monospace; }
-  .moose-logo { font-family: Consolas, 'Courier New', monospace; font-size: 10px; line-height: 1.1; color: #b8860b; white-space: pre; float: right; margin: 0 0 10px 20px; }
+  th, td { border: 1px solid var(--border); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--slate); color: var(--paper); font-weight: 600; letter-spacing: 0.01em; }
+  tr.data-row:hover td { background: #FBF9F5; }
+  tr.severity-critical td:first-child { background: var(--critical-bg); color: var(--critical); font-weight: bold; border-left: 3px solid var(--critical); }
+  tr.severity-high td:first-child { background: var(--high-bg); color: var(--high); font-weight: bold; border-left: 3px solid var(--high); }
+  tr.severity-medium td:first-child { background: var(--medium-bg); color: #8A6B14; border-left: 3px solid var(--medium); }
+  tr.severity-low td:first-child { background: var(--low-bg); color: var(--muted); border-left: 3px solid var(--low); }
+  blockquote { background: var(--gold-tint); border-left: 4px solid var(--gold); margin: 12px 0; padding: 10px 14px; }
+  code { background: #F1EEE7; padding: 1px 5px; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: 0.92em; }
+  .moose-logo { font-family: Consolas, 'Courier New', monospace; font-size: 10px; line-height: 1.1; color: var(--gold); white-space: pre; float: right; margin: 0 0 10px 20px; }
   details { clear: both; }
   ol { padding-left: 22px; }
   ol li { margin: 6px 0; }
-  .ai-section { background: #f3f0ff; border: 1px solid #d4c8f7; border-left: 4px solid #7c5cd6; border-radius: 4px; padding: 4px 20px 16px 20px; margin-top: 16px; }
+  .ai-section { background: #F5F2FA; border: 1px solid #DCD2EC; border-left: 4px solid #7A5FB8; border-radius: 4px; padding: 4px 20px 16px 20px; margin-top: 16px; }
   .ai-section h2, .ai-section h3 { border-bottom: none; }
-  .ai-badge { display: inline-block; font-size: 11px; font-weight: bold; color: #7c5cd6; background: #ece5ff; border-radius: 10px; padding: 2px 10px; margin-bottom: 8px; }
+  .ai-badge { display: inline-block; font-size: 11px; font-weight: bold; color: #6B4FA8; background: #EAE2F7; border-radius: 10px; padding: 2px 10px; margin-bottom: 8px; letter-spacing: 0.02em; }
   details { margin-top: 32px; }
-  details > summary { cursor: pointer; list-style: none; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  details > summary { cursor: pointer; list-style: none; border-bottom: 2px solid var(--gold-tint); padding-bottom: 6px; }
   details > summary::-webkit-details-marker { display: none; }
   details > summary h2 { display: inline-block; margin: 0; border-bottom: none; padding-bottom: 0; }
-  details > summary::before { content: '\25b6'; display: inline-block; margin-right: 8px; font-size: 13px; color: #666; transition: transform 0.15s ease; }
+  details > summary::before { content: '\25b6'; display: inline-block; margin-right: 8px; font-size: 13px; color: var(--gold); transition: transform 0.15s ease; }
   details[open] > summary::before { transform: rotate(90deg); }
-  tr.filter-row td { background: #f7f7f7; padding: 4px 6px; }
-  tr.filter-row input { width: 100%; box-sizing: border-box; font-size: 11px; padding: 3px 5px; border: 1px solid #bbb; border-radius: 3px; font-family: inherit; }
-  .filter-status { font-size: 11px; color: #666; margin: 4px 0 0 2px; }
-  .filter-status button { font-size: 11px; padding: 2px 8px; border: 1px solid #bbb; border-radius: 3px; background: #f0f0f0; cursor: pointer; }
-  .filter-status button:hover { background: #e5e5e5; }
-  .action-allow { color: #1a7a1a; font-weight: bold; }
-  .action-deny { color: #b02a2a; font-weight: bold; }
-  .compare-new { color: #b06a1a; font-weight: bold; }
-  .compare-resolved { color: #1a7a1a; font-weight: bold; }
+  tr.filter-row td { background: #F7F5F0; padding: 4px 6px; }
+  tr.filter-row input { width: 100%; box-sizing: border-box; font-size: 11px; padding: 3px 5px; border: 1px solid #CFC8B8; border-radius: 3px; font-family: inherit; }
+  .filter-status { font-size: 11px; color: var(--muted); margin: 4px 0 0 2px; }
+  .filter-status button { font-size: 11px; padding: 2px 8px; border: 1px solid #CFC8B8; border-radius: 3px; background: #F1EEE7; cursor: pointer; }
+  .filter-status button:hover { background: var(--gold-tint); }
+  .action-allow { color: #2E6B2E; font-weight: bold; }
+  .action-deny { color: var(--critical); font-weight: bold; }
+  .compare-new { color: var(--gold-deep); font-weight: bold; }
+  .compare-resolved { color: #2E6B2E; font-weight: bold; }
   .stat-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0 20px 0; }
-  .stat-card { background: #f7f7f7; border: 1px solid #ddd; border-radius: 6px; padding: 10px 16px; min-width: 130px; }
-  .stat-card .stat-value { font-size: 22px; font-weight: bold; color: #1a1a1a; }
-  .stat-card .stat-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.03em; }
+  .stat-card { background: var(--paper); border: 1px solid var(--border); border-top: 2px solid var(--gold); border-radius: 4px; padding: 10px 16px; min-width: 130px; box-shadow: 0 1px 2px rgba(28,25,23,0.04); }
+  .stat-card .stat-value { font-size: 24px; font-weight: bold; color: var(--slate); }
+  .stat-card .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .chart-row { display: flex; flex-wrap: wrap; gap: 36px; margin: 12px 0 24px 0; }
   .pie-chart-wrap { display: flex; align-items: center; gap: 16px; }
-  .pie-chart-title { font-size: 13px; font-weight: bold; margin-bottom: 8px; color: #333; }
+  .pie-chart-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--slate); }
   .pie-legend { font-size: 12px; }
   .pie-legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; white-space: nowrap; }
   .pie-legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
@@ -913,6 +945,8 @@ function Export-FindingsCsv {
             Service     = $r.ServiceRaw
             Action      = $r.Action
             Profile     = if ($r.Profile) { $r.Profile } else { "none" }
+            Created     = $r.Created
+            Modified    = $r.Modified
         }
     }
 
@@ -928,6 +962,8 @@ function Export-FindingsCsv {
             Service     = if ($ctx) { $ctx.Service } else { "" }
             Action      = if ($ctx) { $ctx.Action } else { "" }
             Profile     = if ($ctx) { $ctx.Profile } else { "" }
+            Created     = if ($ctx) { $ctx.Created } else { "" }
+            Modified    = if ($ctx) { $ctx.Modified } else { "" }
             Type        = $f.Type
             Detail      = $f.Detail
         }
