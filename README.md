@@ -273,8 +273,7 @@ lacks unambiguous evidence.
 
 **Getting a Gemini API key:** Go to
 [aistudio.google.com/api-keys](https://aistudio.google.com/api-keys), sign
-in with a Google account, and click "Create API key" (first-time users get
-a one-time terms-of-service prompt first).
+in with a Google account, and click "Create API key".
 Copy the key and set it as the `GEMINI_API_KEY` environment variable
 before running MooseAlto (or pass it directly with `-ApiKey`; see Usage
 below).
@@ -302,9 +301,7 @@ usefully prioritize about it. It still appears in the local deterministic
 report.
 
 If there are zero findings, or the chosen scope filters everything out,
-the script skips the Gemini call entirely rather than risk the model
-inventing a plausible-sounding but ungrounded summary from an empty
-prompt.
+the script skips the Gemini call entirely.
 
 ## Input format
 
