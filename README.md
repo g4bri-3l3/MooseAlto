@@ -17,7 +17,7 @@
 [![Repo](https://img.shields.io/badge/GitHub-g4bri--3l3%2FMooseAlto-181717?logo=github)](https://github.com/g4bri-3l3/MooseAlto)
 
 PowerShell tool that reviews a Palo Alto/Panorama security rulebase CSV export
-and flags hygiene and exposure issues, combining deterministic rule-based
+and flags hygiene and exposure issues, combining Algorithmic rule-based
 checks with an optional AI-assisted summary (Gemini).
 
 ## Example
@@ -506,6 +506,10 @@ by zone-pair signature first (two rules can only match/shadow each other
 if their zones are compatible), so a rule mostly only gets compared
 against others that could plausibly match rather than every earlier rule
 unconditionally.
+
+## Requirements
+
+Windows PowerShell 5.1 or PowerShell 7+, no external modules needed.
 
 ## Usage
 
