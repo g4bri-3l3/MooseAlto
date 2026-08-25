@@ -28,17 +28,7 @@ function Protect-IPAddresses {
 $SeverityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
 
 function Get-SvgPieChart {
-    # Dependency-free donut chart: plain SVG, no charting library. Drawn
-    # as concentric ring strokes with stroke-dasharray/-dashoffset (each
-    # segment is a dash-length slice of the circle's circumference)
-    # rather than arc-path trigonometry - simpler to compute and the same
-    # technique produces the center hole for free, which a filled pie
-    # can't do without a second masking shape.
-    #
-    # Parallel arrays instead of a hashtable so slice order is exactly
-    # what the caller specifies (hashtable enumeration order isn't
-    # guaranteed in PowerShell, which would make the legend and slice
-    # order shuffle between runs on the same data).
+    # Dependency-free donut chart: plain SVG.
     param([string[]]$Labels, [int[]]$Values, [string[]]$Colors, [int]$Size = 130, [string]$CenterLabel = "")
 
     $total = ($Values | Measure-Object -Sum).Sum
@@ -221,12 +211,8 @@ function Get-ReportLines {
     # A quick visual overview before the detailed findings table: how the
     # ruleset breaks down by action, direction, and profile coverage, plus
     # where the findings severity actually lands. Uses the same
-    # zone/address "touches internet" signals as the deterministic checks,
-    # but a simpler direction classification than the Inventory's (that
-    # one deliberately distinguishes "definite" from "ambiguous" evidence
-    # to pick the single best label per rule; here it's an aggregate count
-    # across the whole ruleset, where that extra precision matters less
-    # than just being reasonably representative).
+    # zone/address "touches internet" signals as the algorithmic checks,
+    # but a simpler direction classification than the Inventory's.
     $enabledRules = @($Rules | Where-Object { -not $_.Disabled })
     $disabledCount = @($Rules | Where-Object { $_.Disabled }).Count
     $allowRules = @($enabledRules | Where-Object { $_.Action -eq "allow" })
