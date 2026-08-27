@@ -5,6 +5,13 @@ All notable changes to MooseAlto are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4] - 2026-08-27
+
+### Added
+- all_rfc1918_effectively_private: an address field listing all three private RFC1918 ranges positively together (e.g. 10.0.0.0/8;172.16.0.0/12;192.168.0.0/16), functionally equivalent to "any private address" even though no token literally says "any" and none of them is individually broad. The mirror case of negated_rfc1918_effectively_public, and not caught by broad_internal_exposure, which only looks for a field that's entirely empty/"any," not one whose listed values happen to add up to the same thing.
+### Fixed
+- internet_exposed_any_field, broad_internal_exposure, unrestricted_access_to_critical_zone/_egress_from_critical_zone, and the temporary-tag broad/narrow classification now recognize a negated- or positive-RFC1918 address field as "effectively any" for their own dimension-counting and severity-escalation logic, not just a literal empty/"any" field.
+
 ## [1.3] - 2026-08-24
 ### Added
 - Created and Modified columns on the Algorithmic-based Findings table, Internet Exposure Inventory, and findings CSV export, shown only when the source CSV actually has them.
