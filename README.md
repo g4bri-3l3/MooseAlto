@@ -136,6 +136,7 @@ default since this is entirely org-specific):
 - `internal_risky_application` / `internal_risky_port`: same
   high-risk port/App-ID list as the inbound checks, applied to purely
   internal traffic.
+- `all_rfc1918_effectively_private`: fires on a purely internal rule whose source or destination lists all three RFC1918 ranges positively.
 
 **Ruleset hygiene** (regardless of internet exposure):
 - `duplicate_rule`: identical match criteria (zone, address, application,
