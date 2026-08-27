@@ -187,6 +187,8 @@ function Import-PaloAltoRules {
 
     $hasDisabledColumn = $realHeaderNames -contains "Disabled"
     $hasOptionsColumn = $realHeaderNames -contains "Options"
+    $hasCreatedColumn = $realHeaderNames -contains "Created"
+    $hasModifiedColumn = $realHeaderNames -contains "Modified"
 
     # Match by substring rather than the exact "Rule Usage: Hit Count" -
     # different PAN-OS/Panorama versions and export types have been seen to
@@ -281,6 +283,10 @@ function Import-PaloAltoRules {
             LastHit     = if ($hasLastHitColumn) { $row.$lastHitColumnName } else { "" }
             Options     = if ($hasOptionsColumn) { $row.Options } else { "" }
             HasOptionsColumn = $hasOptionsColumn
+            Created     = if ($hasCreatedColumn) { $row.Created } else { "" }
+            Modified    = if ($hasModifiedColumn) { $row.Modified } else { "" }
+            HasCreatedColumn = $hasCreatedColumn
+            HasModifiedColumn = $hasModifiedColumn
         }
         $i++
     }
