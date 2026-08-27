@@ -58,8 +58,7 @@ internet, via zone name or a concrete public IP):
 - `inbound_from_internet`: allow rule reachable from the internet on the
   source side, worded to say whether the source is genuinely
   unrestricted (any) or scoped to one specific address reached through an
-  unrestricted zone. Renamed from an earlier `inbound_from_any_public_ip`
-  name that wrongly implied the source was always "any". It fires
+  unrestricted zone. It fires
   whenever the source touches the internet by any means, including a
   rule scoped to a single concrete allowlisted address where only the
   zone (not the address) is unrestricted. Medium, not High: on its own
@@ -74,7 +73,13 @@ internet, via zone name or a concrete public IP):
   but still deserves to show up as "this rule reaches the internet" for
   the same contextual reason the inbound side does.
 - `inbound_risky_application` / `inbound_risky_port`: inbound-from-internet
-  rule matching a high-risk port or App-ID (see list below).
+  rule matching a high-risk port or App-ID (see list below)
+- `outbound_risky_application` / `outbound_risky_port`: same high-risk
+  port/App-ID list, but for a purely outbound rule (source internal,
+  destination internet). An internal host allowed to
+  run RDP/SSH/Telnet out to arbitrary internet destinations is a real
+  concern in its own right: a data-exfiltration or tunneling channel if
+  that host is ever compromised, not just an internet-exposure question.
 - `outbound_any_public_defined_app`: destination is any/internet-facing,
   but application is at least restricted (narrower than fully open, still
   worth a look).
@@ -91,30 +96,43 @@ internet, via zone name or a concrete public IP):
 - `internet_exposed_any_field`: general catch-all for a rule that touches
   the internet (either side) with source zone, source address,
   destination zone, destination address, application, or service left as
-  "any". The narrower checks above only fire for specific single-field
-  combinations; this one catches the gaps between them, such as a rule
-  where both destination and application are "any" simultaneously, or a
-  "Destination Zone: any" rule reaching both directions at once.
-  Deliberately overlaps with the more specific findings above rather than
-  replacing them. Normally High; escalates to **Critical** when source
-  address, destination address, application, AND service are all "any"
-  simultaneously (see the severity methodology section below).
+  "any" **or effectively any** (a negated- or positive-RFC1918 address
+  field counts too, consistent with how direction classification already
+  treats a negated field as reaching the internet). The narrower checks
+  above only fire for specific single-field combinations; this one
+  catches the gaps between them, such as a rule where both destination
+  and application are "any" simultaneously, or a "Destination Zone: any"
+  rule reaching both directions at once. Deliberately overlaps with the
+  more specific findings above rather than replacing them. Normally
+  High; escalates to **Critical** when source address, destination
+  address, application, AND service are all any/effectively-any
+  simultaneously (see the severity methodology section below for why).
 
 **Critical zone isolation** (financial services: SWIFT, PCI DSS  only active if `-CriticalZones` is set, no universal
 default since this is entirely org-specific):
 - `unrestricted_access_to_critical_zone`: a non-critical zone reaches a
   configured critical zone (e.g. SWIFT secure zone, CDE, ATM, core
-  banking, HSM, AD, MGMT) with source zone, source address, or application left
-  unrestricted. Fires independently of internet exposure: SWIFT CSCF and
+  banking, HSM) with source zone, source address, or application left
+  unrestricted (or effectively unrestricted via the RFC1918 idiom, same
+  as above). Fires independently of internet exposure: SWIFT CSCF and
   PCI DSS both require these zones isolated from the *general enterprise
   network*, not just from the internet. A Trust-zone workstation reaching
   the SWIFT zone unrestricted is a real finding even though neither side
   touches the internet.
+- `unrestricted_egress_from_critical_zone`: the mirror case: a critical
+  zone reaches OUT to a non-critical zone with destination zone,
+  destination address, or application left unrestricted (or effectively
+  unrestricted via the RFC1918 idiom). Isolation requirements apply in
+  both directions: a host
+  inside the critical zone with unrestricted egress can exfiltrate data
+  or reach a C2 server just as easily as an attacker could reach in
+  through an overly broad inbound rule.
 
 **Internal traffic** (neither side touches the internet):
 - `broad_internal_exposure`: internal-to-internal rule with source
   address, destination address, and/or application left unrestricted
-  (any). A common lateral-movement / ransomware-propagation pattern.
+  (any, or effectively any via the RFC1918 idiom). A common
+  lateral-movement / ransomware-propagation pattern
 - `internal_risky_application` / `internal_risky_port`: same
   high-risk port/App-ID list as the inbound checks, applied to purely
   internal traffic.
@@ -163,9 +181,21 @@ default since this is entirely org-specific):
   risky. A distinct concern from `inbound_risky_port`/`internal_risky_port`,
   which only fire for ports on the high-risk list. The finding text notes
   when an involved port is also cleartext or otherwise high-risk.
-- `temporary_tag_but_broad_rule`: Tag or rule name contains temp/POC/test/trial-like
-  wording, but the rule still has an unrestricted address or application.
-  A common audit finding.
+- `temporary_tag_but_broad_rule`: the rule name or its Tags contain a
+  temp/POC/test/trial-like word (matched as a whole token split on `-`,
+  `_`, space, or `.`, not a raw substring, so e.g. "Attempted-Migration"
+  doesn't false-positive on "temp"), and the rule still has an
+  unrestricted address or application (or effectively unrestricted via
+  the RFC1918 idiom, same as `broad_internal_exposure` above). SWIFT
+  CSCF specifically cites "broad allow-any entries added as a temporary
+  change years ago and never removed" as a common audit finding.
+- `temporary_tag_still_present`: the narrowly-scoped counterpart to the
+  check above. A temp/POC/test-signaled rule that's already tightly
+  scoped isn't a broad-exposure risk, but the name/tag is still a
+  lifecycle signal someone meant to revisit and never did. Fires instead
+  of (not alongside) `temporary_tag_but_broad_rule` for the same rule,
+  since the two represent different urgency, not the same fact at two
+  severities.
 - `missing_explicit_intrazone_internet_deny`: ruleset-wide, not tied to
   one specific rule. PAN-OS denies interzone traffic by default but
   **allows intrazone traffic by default** (a zone talking to itself)
@@ -397,8 +427,10 @@ internet exploitability**:
   misconfiguration:
   - `any_any_any_allow`
   - `inbound_risky_application` / `inbound_risky_port`
+  - `outbound_risky_application` / `outbound_risky_port`
   - `allow_shadows_deny`
   - `unrestricted_access_to_critical_zone`
+  - `unrestricted_egress_from_critical_zone`
   - `internet_exposed_any_field` **only** when address, application, and
     service are all "any" simultaneously (see the callout below);
     otherwise High
@@ -433,6 +465,7 @@ internet exploitability**:
   - `disabled_rule_present`
   - `rule_usage_partially_used`
   - `missing_explicit_intrazone_internet_deny`
+  - `temporary_tag_still_present`
 
 **Notes:**
 - **`shadowed_rule` is High** A dead rule isn't itself
