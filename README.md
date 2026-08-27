@@ -108,7 +108,7 @@ internet, via zone name or a concrete public IP):
   address, application, AND service are all any/effectively-any
   simultaneously (see the severity methodology section below for why).
 
-**Critical zone isolation** (financial services: SWIFT, PCI DSS  only active if `-CriticalZones` is set, no universal
+**Critical zone isolation** (financial services: SWIFT, PCI DSS,  only active if `-CriticalZones` is set, no universal
 default since this is entirely org-specific):
 - `unrestricted_access_to_critical_zone`: a non-critical zone reaches a
   configured critical zone (e.g. SWIFT secure zone, CDE, ATM, core
@@ -136,7 +136,15 @@ default since this is entirely org-specific):
 - `internal_risky_application` / `internal_risky_port`: same
   high-risk port/App-ID list as the inbound checks, applied to purely
   internal traffic.
-- `all_rfc1918_effectively_private`: fires on a purely internal rule whose source or destination lists all three RFC1918 ranges positively.
+- `all_rfc1918_effectively_private`: an address field lists all three
+  private RFC1918 ranges positively together (e.g.
+  `10.0.0.0/8;172.16.0.0/12;192.168.0.0/16`), functionally equivalent to
+  "any private address" even though no token literally says "any" and
+  none of them is individually broad. Not caught by `broad_internal_exposure`
+  above, which only looks for a field that's entirely empty/"any", not
+  one whose listed values happen to add up to the same thing. Not gated
+  by direction: checked on every rule, not just purely internal ones,
+  even though it usually fires there in practice.
 
 **Ruleset hygiene** (regardless of internet exposure):
 - `duplicate_rule`: identical match criteria (zone, address, application,
@@ -268,7 +276,7 @@ against an earlier run's findings CSV (the standard `report_TIMESTAMP.csv`
 this script itself produces). Matched by (rule name, finding type). The real limitation is that renaming
 a rule between runs makes its findings look "resolved" under the old name
 and "new" under the new one, even though nothing about the underlying
-issue changed - there's no attempt to track a rule's identity across a
+issue changed. There's no attempt to track a rule's identity across a
 rename.
 
 When set, the Algorithmic-based Findings table gets an extra **Comparison**
@@ -444,6 +452,7 @@ internet exploitability**:
   - `shadowed_rule`
   - `internal_risky_application` / `internal_risky_port`
   - `negated_rfc1918_effectively_public`
+  - `all_rfc1918_effectively_private`
   - `internet_exposed_any_field` in the common case (see Critical above
     for the escalated case)
 - **Medium**: widens the attack surface or adds ruleset debt, but
@@ -469,7 +478,7 @@ internet exploitability**:
   - `temporary_tag_still_present`
 
 **Notes:**
-- **`shadowed_rule` is High** A dead rule isn't itself
+- **`shadowed_rule` is High**. A dead rule isn't itself
   exploitable, but it's classified above simple hygiene items because it
   represents a *false sense of security*: whoever wrote it believed it
   was doing something protective, and it silently isn't.
