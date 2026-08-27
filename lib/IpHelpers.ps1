@@ -111,6 +111,61 @@ function Test-IsNegatedPublicPattern {
     return $true
 }
 
+function Test-IsAllRfc1918Pattern {
+    # Mirror case of Test-IsNegatedPublicPattern above: instead of
+    # negating all three RFC1918 blocks together (functionally "any
+    # public"), this lists all three of them POSITIVELY together
+    # (functionally "any private"). Same real-world idiom, opposite
+    # direction - and just as easy to miss in manual review, since the
+    # field never shows "any" here either, just three specific-looking
+    # CIDRs that happen to add up to the entire private address space.
+    #
+    # Requires no token to be a [Negate] expression (that's the other
+    # function's job), and checks that SOME token fully contains each of
+    # the three canonical blocks - covers the common case of each block
+    # listed as its own token, or a broader CIDR that happens to contain
+    # one, without attempting arbitrary fragment reassembly for unusual
+    # splits that haven't been seen in a real export.
+    param([array]$RawTokens)
+    if (-not $RawTokens -or $RawTokens.Count -eq 0) { return $false }
+    foreach ($tok in $RawTokens) {
+        if ($tok -match '^\[Negate\]') { return $false }
+    }
+    $rfc1918Blocks = @("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    foreach ($block in $rfc1918Blocks) {
+        $covered = $false
+        foreach ($tok in $RawTokens) {
+            if ((Test-IsPlainIP $tok) -and (Test-CidrContains -Broader $tok -Narrower $block)) {
+                $covered = $true
+                break
+            }
+        }
+        if (-not $covered) { return $false }
+    }
+    return $true
+}
+
+function Test-AddressFieldEffectivelyAny {
+    # Unifies the "is this address field broad" test used for counting
+    # and severity-escalation purposes (how many dimensions of a rule are
+    # wide open) across any_any_any-adjacent checks. A literal null field
+    # (parsed from "any") is the obvious case, but a field that negates
+    # all of RFC1918 or lists all of RFC1918 positively is EQUALLY broad
+    # in practice, just spelled differently - and Test-AddressTouchesInternet
+    # already treats a negation as reaching the internet for direction
+    # purposes, so a dimension-counting check that still treated the same
+    # field as "specific" would be inconsistent with its own direction
+    # classification, undercounting how open the rule actually is (e.g.
+    # failing to escalate to Critical for a rule that's exactly as open
+    # as any_any_any_allow, just using the negated-RFC1918 idiom for one
+    # field instead of the literal word "any").
+    param($RawTokens)
+    if ($null -eq $RawTokens) { return $true }
+    if (Test-IsNegatedPublicPattern -RawTokens $RawTokens) { return $true }
+    if (Test-IsAllRfc1918Pattern -RawTokens $RawTokens) { return $true }
+    return $false
+}
+
 function Test-IsIpRange {
     # An "IP-IP" range, e.g. "10.5.5.10-10.5.5.50". Distinct from a plain
     # CIDR/IP (which uses "/", never "-"), so there's no ambiguity between
