@@ -343,6 +343,18 @@ function Invoke-DeterministicChecks {
                 Detail   = "Destination address ('$($rule.DstAddrRaw)') negates the private RFC1918 ranges. Functionally equivalent to 'any public destination address', even though no token literally says 'any'. Easy to miss in manual review."
             }
         }
+        if (Test-IsAllRfc1918Pattern -RawTokens $rule.SrcAddr) {
+            $findings += [PSCustomObject]@{
+                RuleName = $rule.Name; Severity = "High"; Type = "all_rfc1918_effectively_private"
+                Detail   = "Source address ('$($rule.SrcAddrRaw)') lists all three private RFC1918 ranges together. Functionally equivalent to 'any private source address', even though no token literally says 'any'. Easy to miss in manual review."
+            }
+        }
+        if (Test-IsAllRfc1918Pattern -RawTokens $rule.DstAddr) {
+            $findings += [PSCustomObject]@{
+                RuleName = $rule.Name; Severity = "High"; Type = "all_rfc1918_effectively_private"
+                Detail   = "Destination address ('$($rule.DstAddrRaw)') lists all three private RFC1918 ranges together. Functionally equivalent to 'any private destination address', even though no token literally says 'any'. Easy to miss in manual review."
+            }
+        }
 
         if ($rule.HitCount -match '^\d+$' -and [int]$rule.HitCount -eq 0) {
             $findings += [PSCustomObject]@{
@@ -399,8 +411,8 @@ function Invoke-DeterministicChecks {
                 $criticalServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
                 $broadDims = @()
                 if ($rule.SrcZone -contains "any") { $broadDims += "source zone" }
-                if ($null -eq $rule.SrcAddr) { $broadDims += "source address" }
-                if ($null -eq $rule.DstAddr) { $broadDims += "destination address (reaches the entire critical zone, not a specific host)" }
+                if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $broadDims += "source address" }
+                if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $broadDims += "destination address (reaches the entire critical zone, not a specific host)" }
                 if ($null -eq $rule.Application) { $broadDims += "application" }
                 if ($criticalServiceEffectivelyAny) { $broadDims += "service" }
                 if ($broadDims.Count -gt 0) {
@@ -422,8 +434,8 @@ function Invoke-DeterministicChecks {
                 $egressServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
                 $egressBroadDims = @()
                 if ($rule.DstZone -contains "any") { $egressBroadDims += "destination zone" }
-                if ($null -eq $rule.DstAddr) { $egressBroadDims += "destination address" }
-                if ($null -eq $rule.SrcAddr) { $egressBroadDims += "source address (any host in the critical zone, not a specific one)" }
+                if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $egressBroadDims += "destination address" }
+                if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $egressBroadDims += "source address (any host in the critical zone, not a specific one)" }
                 if ($null -eq $rule.Application) { $egressBroadDims += "application" }
                 if ($egressServiceEffectivelyAny) { $egressBroadDims += "service" }
                 if ($egressBroadDims.Count -gt 0) {
@@ -458,7 +470,7 @@ function Invoke-DeterministicChecks {
             $matchedInTags = $tempKeywords | Where-Object { $tagTokens -contains $_ } | Select-Object -First 1
             $matchedKeyword = if ($matchedInName) { $matchedInName } else { $matchedInTags }
             $matchSource = if ($matchedInName -and $matchedInTags) { "both the rule name and its tags ('$($rule.Tags)')" } elseif ($matchedInName) { "the rule name itself" } else { "its tags ('$($rule.Tags)')" }
-            $isBroadRule = ($null -eq $rule.SrcAddr) -or ($null -eq $rule.DstAddr) -or ($null -eq $rule.Application)
+            $isBroadRule = (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) -or (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) -or ($null -eq $rule.Application)
             if ($matchedKeyword -and $isBroadRule) {
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = "Medium"; Type = "temporary_tag_but_broad_rule"
@@ -716,9 +728,9 @@ function Invoke-DeterministicChecks {
             $serviceEffectivelyAny2 = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
             $anyDims = @()
             if ($rule.SrcZone -contains "any") { $anyDims += "source zone" }
-            if ($null -eq $rule.SrcAddr) { $anyDims += "source address" }
+            if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $anyDims += "source address" }
             if ($rule.DstZone -contains "any") { $anyDims += "destination zone" }
-            if ($null -eq $rule.DstAddr) { $anyDims += "destination address" }
+            if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $anyDims += "destination address" }
             if ($null -eq $rule.Application) { $anyDims += "application" }
             if ($serviceEffectivelyAny2) { $anyDims += "service" }
             if ($anyDims.Count -gt 0) {
@@ -731,7 +743,10 @@ function Invoke-DeterministicChecks {
                 # destination, any app, any service) only ever reached High
                 # - the same practical risk, understated because
                 # any_any_any_allow only fires on the literal string "any".
-                $severity = if ($null -eq $rule.SrcAddr -and $null -eq $rule.DstAddr -and $null -eq $rule.Application -and $serviceEffectivelyAny2) { "Critical" } else { "High" }
+                # Same broadened test as $anyDims above: a negated/all-RFC1918
+                # address field is exactly as open as a literal "any" one for
+                # this purpose, just spelled differently.
+                $severity = if ((Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) -and $null -eq $rule.Application -and $serviceEffectivelyAny2) { "Critical" } else { "High" }
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = $severity; Type = "internet_exposed_any_field"
                     Detail   = "Rule touches the internet (inbound and/or outbound: source '$($rule.SrcZone -join ';')' / '$($rule.SrcAddrRaw)', destination '$($rule.DstZone -join ';')' / '$($rule.DstAddrRaw)') with $($anyDims -join '/') left unrestricted (any). Every internet-adjacent 'any' widens what this rule can actually match."
@@ -741,10 +756,12 @@ function Invoke-DeterministicChecks {
 
         # --- Fully internal traffic: broad exposure (lateral movement risk) ---
         if (-not $srcIsInet -and -not $dstIsInet) {
-            if ($null -eq $rule.SrcAddr -or $null -eq $rule.DstAddr -or $null -eq $rule.Application -or $null -eq $rule.Service) {
+            $srcEffectivelyAny = Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr
+            $dstEffectivelyAny = Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr
+            if ($srcEffectivelyAny -or $dstEffectivelyAny -or $null -eq $rule.Application -or $null -eq $rule.Service) {
                 $broadDims = @()
-                if ($null -eq $rule.SrcAddr) { $broadDims += "source address" }
-                if ($null -eq $rule.DstAddr) { $broadDims += "destination address" }
+                if ($srcEffectivelyAny) { $broadDims += "source address" }
+                if ($dstEffectivelyAny) { $broadDims += "destination address" }
                 if ($null -eq $rule.Application) { $broadDims += "application" }
                 if ($null -eq $rule.Service) { $broadDims += "service" }
                 $findings += [PSCustomObject]@{
@@ -1048,6 +1065,8 @@ function Build-InternetExposureInventory {
             Service     = $rule.ServiceRaw
             Action      = $rule.Action
             Profile     = if ($rule.Profile) { $rule.Profile } else { "none" }
+            Created     = $rule.Created
+            Modified    = $rule.Modified
         }
     }
     return $inventory
