@@ -846,7 +846,7 @@ function makeMooseColumnsResizable(table) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-  document.querySelectorAll('.table-wrap table').forEach(makeMooseColumnsResizable);
+  document.querySelectorAll('table.resizable-table').forEach(makeMooseColumnsResizable);
 });
 </script>
 "@
@@ -887,7 +887,18 @@ document.addEventListener('DOMContentLoaded', function () {
                 $compareColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "comparison")
                 $sourceColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "source")
                 $destColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "destination")
-                $htmlLines.Add("<div class='table-wrap'><table>")
+                # Column resizing is only wired up for the two big,
+                # many-column tables (Findings, Inventory) via this same
+                # "not Summary" condition already used for filters - not
+                # Summary (2 columns, nothing worth resizing), and not the
+                # small Rule Statistics tables either, which are built via
+                # a separate raw-HTML path and never reach this branch at
+                # all. Freezing a small table's width into fixed pixels
+                # would lock in whatever a flex-row + width:100% happened
+                # to stretch it to at load time, not its actual content
+                # width.
+                $tableClass = if ($addFilters) { " class='resizable-table'" } else { "" }
+                $htmlLines.Add("<div class='table-wrap'><table$tableClass>")
                 $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th>$_</th>" }) -join "") + "</tr>")
                 if ($addFilters) {
                     $filterCells = ($cells | ForEach-Object { "<td><input type='text' oninput='filterMooseTable(this)' placeholder='Filter...'></td>" }) -join ""
