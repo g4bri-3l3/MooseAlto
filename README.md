@@ -453,6 +453,7 @@ internet exploitability**:
   - `internal_risky_application` / `internal_risky_port`
   - `negated_rfc1918_effectively_public`
   - `all_rfc1918_effectively_private`
+  - `rule_name_action_mismatch`
   - `internet_exposed_any_field` in the common case (see Critical above
     for the escalated case)
 - **Medium**: widens the attack surface or adds ruleset debt, but
@@ -471,6 +472,8 @@ internet exploitability**:
   - `stale_last_hit`
   - `port_based_rule_missing_app_id`
   - `temporary_tag_but_broad_rule`
+  - `oversized_address_list`
+  - `no_logging_enabled`
 - **Low**: low/informational, no active risk:
   - `disabled_rule_present`
   - `rule_usage_partially_used`
