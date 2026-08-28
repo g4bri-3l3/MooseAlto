@@ -5,6 +5,12 @@ All notable changes to MooseAlto are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [1.5] - 2026-08-28
+### Added
+- Report tables now scroll horizontally within their own container instead of widening the whole page, with native touch-swipe support on modern mobile browsers (no extra code needed for that part, overflow-x: auto handles it).
+- Source and Destination columns are truncated with an ellipsis by default and show the full value on hover via a native tooltip, so a cell listing many negated ranges or individually-enumerated addresses no longer forces the whole table wide enough to bury the Type/Detail columns behind a wall of scrolling.
+- All table columns are now resizable by dragging a handle on the right edge of each header, starting from the browser's own content-based width. Works with both mouse and touch.
+
 ## [1.4] - 2026-08-27
 
 ### Added
