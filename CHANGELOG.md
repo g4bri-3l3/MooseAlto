@@ -10,6 +10,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Report tables now scroll horizontally within their own container instead of widening the whole page, with native touch-swipe support on modern mobile browsers (no extra code needed for that part, overflow-x: auto handles it).
 - Source and Destination columns are truncated with an ellipsis by default and show the full value on hover via a native tooltip, so a cell listing many negated ranges or individually-enumerated addresses no longer forces the whole table wide enough to bury the Type/Detail columns behind a wall of scrolling.
 - All table columns are now resizable by dragging a handle on the right edge of each header, starting from the browser's own content-based width. Works with both mouse and touch.
+### Fixed
+- oversized_address_list now counts how many tokens the rule author actually wrote in Source/Destination (e.g. two group names), not how many individual addresses those resolve to after -AddressObjectsCsv/-AddressGroupsCsv expansion. A rule referencing a couple of well-organized, clearly-named groups isn't the same audit concern as one with dozens of individual addresses pasted directly into the field, even if the resolved count comes out the same. The pre-resolution count is captured on each rule before resolution overwrites the address list.
 
 ## [1.4] - 2026-08-27
 
