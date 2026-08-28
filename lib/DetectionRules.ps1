@@ -527,8 +527,8 @@ function Invoke-DeterministicChecks {
         # this out as its own finding, distinct from the any/none-based
         # checks elsewhere in this file.
         if ($rule.Action -eq "allow") {
-            $srcCount = if ($null -eq $rule.SrcAddr) { 0 } else { $rule.SrcAddr.Count }
-            $dstCount = if ($null -eq $rule.DstAddr) { 0 } else { $rule.DstAddr.Count }
+            $srcCount = $rule.SrcAddrTokenCount
+            $dstCount = $rule.DstAddrTokenCount
             $oversizedSides = @()
             if ($srcCount -gt $MaxAddressListSize) { $oversizedSides += "source ($srcCount addresses)" }
             if ($dstCount -gt $MaxAddressListSize) { $oversizedSides += "destination ($dstCount addresses)" }
