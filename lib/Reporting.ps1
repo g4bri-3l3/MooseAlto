@@ -701,9 +701,13 @@ function ConvertTo-ReportHtml {
   h1 { border-bottom: 3px solid var(--gold); padding-bottom: 10px; }
   h2 { margin: 0; color: var(--slate); }
   h3 { margin-top: 20px; color: var(--slate); }
-  .table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 12px 0; }
+  .table-wrap { border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; margin: 12px 0; }
   table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 0; }
   th, td { padding: 8px 10px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
+  .col-truncate { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+  th { position: relative; }
+  .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 7px; cursor: col-resize; touch-action: none; }
+  .col-resize-handle:hover, .col-resize-handle.resizing { background: rgba(253, 252, 250, 0.35); }
   tr:first-child > th { border-top: none; }
   th { background: var(--slate); color: var(--paper); font-weight: 600; letter-spacing: 0.01em; border-top: none; }
   tr.data-row:nth-child(even) td { background: #FBF9F5; }
@@ -779,6 +783,71 @@ function clearMooseFilters(button) {
   table.querySelectorAll('tr.filter-row input').forEach(function (i) { i.value = ''; });
   filterMooseTable(table.querySelector('tr.filter-row input'));
 }
+
+function makeMooseColumnsResizable(table) {
+  // Columns start at whatever width the browser's normal table-layout
+  // (content-based) already computed - that's the "auto-adapts to the
+  // screen" part, since it already accounts for what's actually in each
+  // column. Freezing those widths into explicit inline styles and only
+  // then switching to table-layout:fixed is what makes dragging a column
+  // afterward behave predictably instead of every other column jumping
+  // around to compensate.
+  var headers = table.querySelectorAll('th');
+  headers.forEach(function (th) {
+    th.style.width = th.offsetWidth + 'px';
+  });
+  table.style.tableLayout = 'fixed';
+
+  headers.forEach(function (th) {
+    var handle = document.createElement('div');
+    handle.className = 'col-resize-handle';
+    th.appendChild(handle);
+
+    var startX = 0;
+    var startWidth = 0;
+
+    function onMove(clientX) {
+      var newWidth = startWidth + (clientX - startX);
+      if (newWidth > 40) { th.style.width = newWidth + 'px'; }
+    }
+    function mouseMove(e) { onMove(e.pageX); }
+    function mouseUp() {
+      handle.classList.remove('resizing');
+      document.removeEventListener('mousemove', mouseMove);
+      document.removeEventListener('mouseup', mouseUp);
+    }
+    handle.addEventListener('mousedown', function (e) {
+      startX = e.pageX;
+      startWidth = th.offsetWidth;
+      handle.classList.add('resizing');
+      document.addEventListener('mousemove', mouseMove);
+      document.addEventListener('mouseup', mouseUp);
+      e.preventDefault();
+    });
+
+    // Separate from the native swipe-to-scroll on .table-wrap (that one
+    // needs no JS at all, overflow-x:auto handles it on any modern
+    // touch browser) - this is specifically for dragging the resize
+    // handle itself with a finger.
+    function touchMove(e) { onMove(e.touches[0].pageX); e.preventDefault(); }
+    function touchEnd() {
+      handle.classList.remove('resizing');
+      document.removeEventListener('touchmove', touchMove);
+      document.removeEventListener('touchend', touchEnd);
+    }
+    handle.addEventListener('touchstart', function (e) {
+      startX = e.touches[0].pageX;
+      startWidth = th.offsetWidth;
+      handle.classList.add('resizing');
+      document.addEventListener('touchmove', touchMove, { passive: false });
+      document.addEventListener('touchend', touchEnd);
+    });
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('.table-wrap table').forEach(makeMooseColumnsResizable);
+});
 </script>
 "@
 
@@ -816,6 +885,8 @@ function clearMooseFilters(button) {
                 $addFilters = $currentSectionHeading -ne "Summary"
                 $actionColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "action")
                 $compareColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "comparison")
+                $sourceColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "source")
+                $destColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "destination")
                 $htmlLines.Add("<div class='table-wrap'><table>")
                 $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th>$_</th>" }) -join "") + "</tr>")
                 if ($addFilters) {
@@ -850,6 +921,19 @@ function clearMooseFilters(button) {
                         if ($compareLower -eq "new") { "<td><span class='compare-new'>$($cells[$c])</span></td>" }
                         elseif ($compareLower -eq "resolved") { "<td><span class='compare-resolved'>$($cells[$c])</span></td>" }
                         else { "<td>$($cells[$c])</td>" }
+                    }
+                    elseif ($c -eq $sourceColumnIndex -or $c -eq $destColumnIndex) {
+                        # Truncated with an ellipsis by default and the full
+                        # value available on hover via the native title
+                        # tooltip (no JS needed for that part): a Source or
+                        # Destination cell listing many negated ranges or
+                        # individually-enumerated addresses can otherwise
+                        # force the whole table wide enough that reaching the
+                        # Type/Detail columns means scrolling past a wall of
+                        # IPs. Dragging the column wider (see resize handles)
+                        # overrides this by simply giving the cell more room
+                        # to show before it needs to truncate at all.
+                        "<td class='col-truncate' title='$($cells[$c].Replace("'", "&#39;"))'>$($cells[$c])</td>"
                     }
                     else { "<td>$($cells[$c])</td>" }
                 }
