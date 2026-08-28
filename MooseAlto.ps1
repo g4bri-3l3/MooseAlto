@@ -119,7 +119,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "1.5"
+$script:MooseAltoVersion = "1.4"
 
 function Show-Banner {
     $lines = @(
@@ -272,6 +272,19 @@ if ((Get-Item -Path $InputCsv).Length -eq 0) {
 $processingStartTime = Get-Date
 
 $rules = Import-PaloAltoRules -Path $InputCsv
+
+# Captured before any address-object/group resolution below, which
+# replaces $rule.SrcAddr/DstAddr with the fully expanded member list.
+# oversized_address_list needs the count of what the rule author actually
+# wrote (e.g. two group names), not how many individual addresses those
+# groups happen to expand to - a rule referencing two clearly-named,
+# well-organized groups isn't the same audit concern as one with 100
+# individually-enumerated IPs pasted directly into the field, even if the
+# resolved address count comes out the same.
+foreach ($rule in $rules) {
+    $rule | Add-Member -NotePropertyName SrcAddrTokenCount -NotePropertyValue $(if ($null -eq $rule.SrcAddr) { 0 } else { $rule.SrcAddr.Count })
+    $rule | Add-Member -NotePropertyName DstAddrTokenCount -NotePropertyValue $(if ($null -eq $rule.DstAddr) { 0 } else { $rule.DstAddr.Count })
+}
 
 $addressObjects = Import-AddressObjects -Path $AddressObjectsCsv
 $addressGroups = Import-AddressGroups -Path $AddressGroupsCsv
