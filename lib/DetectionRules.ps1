@@ -679,6 +679,33 @@ function Invoke-DeterministicChecks {
                     }
                 }
             }
+
+            # ICMP-family traffic allowed outbound to an unrestricted
+            # destination is a classic covert-channel pattern: ICMP is
+            # rarely inspected as closely as TCP/UDP traffic (it's "just
+            # ping"), and data can be encoded in echo/payload fields to
+            # exfiltrate data or maintain a C2 channel. "ping" (App-ID for
+            # ICMP type 0/8 specifically) and "icmp" (the broader App-ID
+            # covering every other ICMP type) are genuinely different
+            # App-IDs in PAN-OS, confirmed by Palo Alto's own KB: a rule
+            # scoped to "ping" alone does NOT also cover general ICMP, and
+            # vice versa, so both need checking, along with "ipv6-icmp"
+            # (the IPv6 equivalent) and "traceroute" (ICMP-based, same
+            # underlying protocol). The Service field is checked too as a
+            # defensive fallback for a custom-named Service object, though
+            # Palo Alto's own guidance is that ICMP has no real port to
+            # match on Service and is normally left as application-default
+            # or any there, not a literal "icmp" string.
+            $icmpFamilyApps = @("ping", "icmp", "ipv6-icmp", "traceroute")
+            $hasIcmpApp = $rule.Application -and (@($rule.Application | Where-Object { $icmpFamilyApps -contains $_ }).Count -gt 0)
+            $hasIcmpService = $rule.Service -and (@($rule.Service | Where-Object { $_ -match "icmp" }).Count -gt 0)
+            if (($hasIcmpApp -or $hasIcmpService) -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr)) {
+                $icmpMatchSource = if ($hasIcmpApp) { "Application ($(($rule.Application | Where-Object { $icmpFamilyApps -contains $_ }) -join ', '))" } else { "Service" }
+                $findings += [PSCustomObject]@{
+                    RuleName = $rule.Name; Severity = "Medium"; Type = "outbound_icmp_to_unrestricted_destination"
+                    Detail   = "Rule allows outbound ICMP-family traffic ($icmpMatchSource) from source address='$($rule.SrcAddrRaw)' to an unrestricted destination (any). ICMP is often overlooked by inspection compared to TCP/UDP traffic; data can be encoded in echo/payload fields to exfiltrate data or maintain a covert C2 channel. Consider scoping the destination to specific, known hosts if this is meant for reachability testing."
+                }
+            }
         }
 
         # Note: fires on $srcIsInet alone, not requiring the destination to
