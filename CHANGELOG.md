@@ -5,6 +5,10 @@ All notable changes to MooseAlto are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [1.6] - 2026-08-31
+### Added
+- outbound_icmp_to_unrestricted_destination: outbound rule permits ICMP-family traffic (App-ID ping, icmp, ipv6-icmp, or traceroute, or a Service object literally named icmp as a fallback) to an unrestricted destination (any, or effectively any via the RFC1918 idiom). ICMP is often overlooked by inspection compared to TCP/UDP traffic; data can be encoded in echo/payload fields to exfiltrate data or maintain a covert C2 channel. Not flagged when the destination is scoped to specific, known hosts.
+
 ## [1.5] - 2026-08-28
 ### Added
 - Report tables now scroll horizontally within their own container instead of widening the whole page, with native touch-swipe support on modern mobile browsers (no extra code needed for that part, overflow-x: auto handles it).
