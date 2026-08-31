@@ -80,6 +80,7 @@ internet, via zone name or a concrete public IP):
   run RDP/SSH/Telnet out to arbitrary internet destinations is a real
   concern in its own right: a data-exfiltration or tunneling channel if
   that host is ever compromised, not just an internet-exposure question.
+- `outbound_icmp_to_unrestricted_destination`: outbound rule permits ICMP-family traffic (App-ID ping, icmp, ipv6-icmp, or traceroute, or a Service object literally named icmp as a fallback) to an unrestricted destination (any, or effectively any via the RFC1918 idiom). ICMP is often overlooked by inspection compared to TCP/UDP traffic; data can be encoded in echo/payload fields to exfiltrate data or maintain a covert C2 channel. Not flagged when the destination is scoped to specific, known hosts, since that's ordinary reachability testing rather than this pattern.
 - `outbound_any_public_defined_app`: destination is any/internet-facing,
   but application is at least restricted (narrower than fully open, still
   worth a look).
@@ -465,6 +466,7 @@ internet exploitability**:
   - `plain_dns_to_unrestricted_destination`
   - `plain_dns_to_known_resolver`
   - `broad_internal_exposure`
+  - `outbound_icmp_to_unrestricted_destination`
   - `duplicate_rule`
   - `deny_shadows_allow`
   - `zero_hit_count`
