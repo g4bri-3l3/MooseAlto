@@ -421,6 +421,37 @@ Write-Host "Sending $($findingsToSend.Count) finding(s) ($(if ($sendOnlyInternet
 $llmResult = Invoke-GeminiNarrative -UserPrompt $userPrompt -ApiKey $ApiKey -Model $Model
 
 if ($llmResult) {
+    # Apply any AI-guessed Application suggestions back onto the matching
+    # findings BEFORE rebuilding the report, so they show up in the
+    # Suggested Fix column itself rather than only in a separate summary
+    # block. Matched by (rule name, type) together. The type allowlist
+    # here is a deliberate second check on top of the system prompt's own
+    # instruction to only suggest for these three types: if the model ever
+    # returned a suggestion for some other type (a slip, not expected but
+    # not impossible), blindly applying it would silently overwrite that
+    # finding's existing deterministic SuggestedFix instead of leaving it
+    # alone.
+    if ($llmResult.application_suggestions) {
+        $eligibleSuggestionTypes = @("any_any_any_allow", "outbound_defined_dest_any_app", "port_based_rule_missing_app_id")
+        $appliedCount = 0
+        foreach ($sugg in $llmResult.application_suggestions) {
+            if ($eligibleSuggestionTypes -notcontains $sugg.type) { continue }
+            $matchingFinding = $findings | Where-Object { $_.RuleName -eq $sugg.rule_name -and $_.Type -eq $sugg.type } | Select-Object -First 1
+            if ($matchingFinding) {
+                $suggestionText = "AI guess (verify): App-ID '$($sugg.suggested_application)'. $($sugg.reasoning)"
+                $matchingFinding | Add-Member -NotePropertyName SuggestedFix -NotePropertyValue $suggestionText -Force
+                $appliedCount++
+            }
+        }
+        if ($appliedCount -gt 0) {
+            # The Findings table was already rendered to text once above;
+            # there's no cheaper way to get these into its Suggested Fix
+            # column than re-running the same render call now that some
+            # findings carry an updated value.
+            $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
+        }
+    }
+
     $aiLines = @("", "## AI-Assisted Summary (Gemini, IP addresses masked before sending)", "")
     $aiLines += $llmResult.executive_summary
     $aiLines += ""
