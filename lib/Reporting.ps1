@@ -167,6 +167,13 @@ function Get-ReportLines {
     # row would just be noise.
     $showCreatedModified = @($Rules | Where-Object { $_.HasCreatedColumn -or $_.HasModifiedColumn }).Count -gt 0
 
+    # Same reasoning for Suggested Fix: shown only when at least one
+    # finding actually has one (deterministic ones are always present for
+    # a handful of types; AI-guessed ones only show up after the optional
+    # Gemini step runs and this function gets called a second time to
+    # rebuild the report with them included).
+    $showSuggestedFix = @($Findings | Where-Object { $_.SuggestedFix }).Count -gt 0
+
     # The any_any_any_allow finding itself is the broadest possible rule in
     # the ruleset. Pin just that row to the top, not every other finding
     # for the same rule (those still sort by severity normally).
@@ -474,6 +481,7 @@ function Get-ReportLines {
             Created  = if ($ctx) { $ctx.Created } else { "" }
             Modified = if ($ctx) { $ctx.Modified } else { "" }
             Type     = $f.Type; Detail = $f.Detail; Compare = $compareTag
+            Suggested = if ($f.SuggestedFix) { $f.SuggestedFix } else { "" }
         })
     }
     if ($comparison) {
@@ -484,6 +492,7 @@ function Get-ReportLines {
                 Action   = $f.Action; Profile = $f.Profile
                 Created  = $f.Created; Modified = $f.Modified
                 Type     = $f.Type; Detail = $f.Detail; Compare = "Resolved"
+                Suggested = ""
             })
         }
         # Stable sort: within the same severity, current-run rows (already
@@ -500,17 +509,20 @@ function Get-ReportLines {
     $lines += "## Algorithmic-based Findings"
     $lines += ""
     $extraHeader = if ($showCreatedModified) { " Created | Modified |" } else { "" }
+    $suggestedHeader = if ($showSuggestedFix) { " Suggested Fix |" } else { "" }
     $compareHeader = if ($comparison) { " Comparison |" } else { "" }
-    $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile |$extraHeader Type | Detail |$compareHeader"
+    $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile |$extraHeader Type | Detail |$suggestedHeader$compareHeader"
     $sep = "|---|---|---|---|---|---|---|---|"
     if ($showCreatedModified) { $sep += "---|---|" }
     $sep += "---|---|"
+    if ($showSuggestedFix) { $sep += "---|" }
     if ($comparison) { $sep += "---|" }
     $lines += $sep
     foreach ($r in $renderRows) {
         $extraVals = if ($showCreatedModified) { " $($r.Created) | $($r.Modified) |" } else { "" }
+        $suggestedVal = if ($showSuggestedFix) { " $($r.Suggested) |" } else { "" }
         $compareVal = if ($comparison) { " $($r.Compare) |" } else { "" }
-        $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) |$extraVals $($r.Type) | $($r.Detail) |$compareVal"
+        $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) |$extraVals $($r.Type) | $($r.Detail) |$suggestedVal$compareVal"
     }
 
     $sortedInventory = $Inventory
@@ -563,9 +575,22 @@ Your job:
 - If NO findings are provided, say so plainly instead of describing generic
   firewall risks. Never fill an empty input with a plausible-sounding but
   invented narrative.
+- For findings whose type is any_any_any_allow, outbound_defined_dest_any_app,
+  or port_based_rule_missing_app_id specifically, and ONLY those types, guess a
+  plausible App-ID the rule was probably meant to use, based on the rule name,
+  its Tags (if given), and any port/service already visible in the finding
+  text. Base this only on what's actually in the rule name/tags/port; if
+  nothing gives a real hint, omit that finding from this array entirely
+  rather than guessing something generic like "web-browsing" by default.
+  This is explicitly a guess for a human to verify, not a determination, and
+  your reasoning field must say what specifically (which word in the name, tag,
+  or port) led to the guess.
 
 Respond with a single JSON object only, no markdown fences, matching this schema:
-{ "executive_summary": "...", "remediation_order": ["...", "...", "..."] }
+{ "executive_summary": "...", "remediation_order": ["...", "...", "..."],
+  "application_suggestions": [ { "rule_name": "...", "type": "...", "suggested_application": "...", "reasoning": "..." } ] }
+The application_suggestions array may be empty if no finding of the eligible
+types was given, or if none had enough of a hint to guess from.
 "@
 
 function Invoke-HttpPostWithSpinner {
@@ -707,6 +732,9 @@ function ConvertTo-ReportHtml {
   .col-truncate { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
   th { position: relative; }
   .col-resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 7px; cursor: col-resize; touch-action: none; }
+  .col-drag-label { cursor: grab; display: inline-block; touch-action: none; }
+  th.col-dragging { opacity: 0.4; }
+  th.col-drop-target { background: rgba(166, 114, 15, 0.55); }
   .col-resize-handle:hover, .col-resize-handle.resizing { background: rgba(253, 252, 250, 0.35); }
   tr:first-child > th { border-top: none; }
   th { background: var(--slate); color: var(--paper); font-weight: 600; letter-spacing: 0.01em; border-top: none; }
@@ -848,6 +876,110 @@ function makeMooseColumnsResizable(table) {
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('table.resizable-table').forEach(makeMooseColumnsResizable);
 });
+
+function makeMooseColumnsReorderable(table) {
+  // The header row specifically (first <tr> in the table) drives which
+  // index is "column N" - every other row (the filter row, if present,
+  // and every data row) just gets its cell moved to match, so filters
+  // and data stay aligned with whatever the header now says.
+  var headerRow = table.querySelector('tr');
+  var allRows = table.querySelectorAll('tr');
+
+  function getHeaderIndex(th) {
+    return Array.prototype.indexOf.call(headerRow.children, th);
+  }
+
+  function reorderAllRows(sourceIndex, targetIndex) {
+    if (sourceIndex === targetIndex) { return; }
+    allRows.forEach(function (row) {
+      var cells = Array.prototype.slice.call(row.children);
+      var sourceCell = cells[sourceIndex];
+      if (!sourceCell) { return; }
+      if (targetIndex >= cells.length) {
+        row.appendChild(sourceCell);
+      } else {
+        row.insertBefore(sourceCell, cells[targetIndex]);
+      }
+    });
+  }
+
+  Array.prototype.slice.call(headerRow.children).forEach(function (th) {
+    var label = th.querySelector('.col-drag-label');
+    if (!label) { return; }
+
+    var sourceIndex = null;
+    var currentTargetTh = null;
+
+    function clearHighlight() {
+      if (currentTargetTh) { currentTargetTh.classList.remove('col-drop-target'); }
+      currentTargetTh = null;
+    }
+
+    // document.elementFromPoint rather than tracking deltas: with columns
+    // free to have any width (including user-resized ones), "which header
+    // is the pointer over right now" is simpler and more reliable to ask
+    // directly than to compute from a running offset.
+    function findHeaderAt(clientX, clientY) {
+      var el = document.elementFromPoint(clientX, clientY);
+      while (el && el.tagName !== 'TH') { el = el.parentElement; }
+      return (el && el.closest('tr') === headerRow) ? el : null;
+    }
+
+    function onMove(clientX, clientY) {
+      var target = findHeaderAt(clientX, clientY);
+      if (target !== currentTargetTh) {
+        clearHighlight();
+        if (target && target !== th) {
+          target.classList.add('col-drop-target');
+          currentTargetTh = target;
+        }
+      }
+    }
+
+    function endDrag() {
+      th.classList.remove('col-dragging');
+      if (currentTargetTh) {
+        reorderAllRows(sourceIndex, getHeaderIndex(currentTargetTh));
+      }
+      clearHighlight();
+    }
+
+    function mouseMove(e) { onMove(e.clientX, e.clientY); }
+    function mouseUp() {
+      endDrag();
+      document.removeEventListener('mousemove', mouseMove);
+      document.removeEventListener('mouseup', mouseUp);
+    }
+    label.addEventListener('mousedown', function (e) {
+      sourceIndex = getHeaderIndex(th);
+      th.classList.add('col-dragging');
+      document.addEventListener('mousemove', mouseMove);
+      document.addEventListener('mouseup', mouseUp);
+      e.preventDefault();
+    });
+
+    function touchMove(e) {
+      var t = e.touches[0];
+      onMove(t.clientX, t.clientY);
+      e.preventDefault();
+    }
+    function touchEnd() {
+      endDrag();
+      document.removeEventListener('touchmove', touchMove);
+      document.removeEventListener('touchend', touchEnd);
+    }
+    label.addEventListener('touchstart', function (e) {
+      sourceIndex = getHeaderIndex(th);
+      th.classList.add('col-dragging');
+      document.addEventListener('touchmove', touchMove, { passive: false });
+      document.addEventListener('touchend', touchEnd);
+    }, { passive: true });
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('table.resizable-table').forEach(makeMooseColumnsReorderable);
+});
 </script>
 "@
 
@@ -899,7 +1031,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 # width.
                 $tableClass = if ($addFilters) { " class='resizable-table'" } else { "" }
                 $htmlLines.Add("<div class='table-wrap'><table$tableClass>")
-                $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th>$_</th>" }) -join "") + "</tr>")
+                $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th><span class='col-drag-label'>$_</span></th>" }) -join "") + "</tr>")
                 if ($addFilters) {
                     $filterCells = ($cells | ForEach-Object { "<td><input type='text' oninput='filterMooseTable(this)' placeholder='Filter...'></td>" }) -join ""
                     $htmlLines.Add("<tr class='filter-row'>$filterCells</tr>")
