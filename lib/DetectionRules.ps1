@@ -97,6 +97,29 @@ function Test-ZoneIsNamedInternetZone {
     return $false
 }
 
+function Test-ServiceNameImpliesRiskyApp {
+    # A custom-named Service object can be named exactly after the risky
+    # app/protocol ("smtp"), or have a port or other suffix appended to
+    # that name ("smtp-25", "SMTP_Relay_25") - a naming style seen on
+    # real, pre-App-ID-era rulebases. Checked two ways: the whole token
+    # against the risky-app dictionary first (catches both a bare name
+    # and a hyphenated App-ID name like "ms-rdp" used as-is), then each
+    # individual sub-token split on the same separators used elsewhere in
+    # this file for name matching (catches a simple name with a port/
+    # suffix appended, like "smtp-25"). This deliberately won't catch a
+    # hyphenated App-ID name with a port ALSO appended (e.g.
+    # "ms-rdp-3389") - a real but much rarer combination that would need
+    # sub-sequence matching, not worth the added complexity for how
+    # infrequently it's likely to come up.
+    param([string]$ServiceToken, [hashtable]$RiskyApplications)
+    if ($RiskyApplications.ContainsKey($ServiceToken)) { return $ServiceToken }
+    $subTokens = @($ServiceToken -split '[-_\s\.]+' | Where-Object { $_ -ne "" })
+    foreach ($sub in $subTokens) {
+        if ($RiskyApplications.ContainsKey($sub)) { return $sub }
+    }
+    return $null
+}
+
 function Test-ServiceEffectivelyAny {
     # "application-default" isn't literally "any" in the Service field, but
     # when Application is ALSO "any" it places no real restriction on the
@@ -219,9 +242,52 @@ function Test-AddressIsExclusivelyPublic {
     return $false
 }
 
+function Test-AddressIsExclusivelyPrivate {
+    # The mirror check to Test-AddressIsExclusivelyPublic above: true only
+    # when EVERY token in the address field is a plain (non-negated) IP/
+    # CIDR that resolves to private/special IP space, and there's at
+    # least one token - null/any doesn't count, it doesn't narrow
+    # anything. Used to override a zone="any" signal in Test-SideIsInternet
+    # below: PAN-OS matches zone AND address together on a rule, not
+    # either alone, so a rule scoped to zone="any" but an address field
+    # that's exclusively a specific private host can never actually be
+    # reached from the real internet, no matter how broad the zone field
+    # looks in isolation. Kept deliberately conservative: an IP range, an
+    # unresolved address-object name, or anything mixed with even one
+    # non-private token falls through to the old, safer-if-imprecise
+    # behavior rather than risk suppressing a genuine finding on
+    # something this function isn't confident enough to call
+    # "exclusively private."
+    param($AddrTokens)
+    if ($null -eq $AddrTokens -or $AddrTokens.Count -eq 0) { return $false }
+    foreach ($tok in $AddrTokens) {
+        if ($tok -match '^\[Negate\]') { return $false }
+        if (-not (Test-IsPlainIP $tok)) { return $false }
+        if (-not (Test-PrivateOrSpecialIP $tok)) { return $false }
+    }
+    return $true
+}
+
 function Test-SideIsInternet {
+    # A specifically-named internet zone (e.g. Untrust) is trusted as-is
+    # regardless of the address field - which interface traffic arrives
+    # on is a deliberate signal an address shouldn't override. But
+    # zone="any" carries no such deliberate signal by itself; it's only
+    # "internet-touching" because it's broad enough to also include
+    # internet-facing zones among everything else it matches. If the
+    # address field is exclusively, explicitly private, PAN-OS's
+    # AND-across-fields matching means this rule can only ever match that
+    # specific private host regardless of which zone the traffic arrives
+    # on - so it can never actually be reached from the real internet,
+    # and zone="any" alone isn't enough to call this side
+    # internet-touching in that case. A real public IP or a [Negate]
+    # token on the address side is unaffected by this and still counts
+    # normally (see Test-AddressTouchesInternet).
     param([array]$Zones, $AddrTokens, [array]$InternetZoneSet)
-    return (Test-ZoneTouchesInternet -Zones $Zones -InternetZoneSet $InternetZoneSet) -or (Test-AddressTouchesInternet -AddrTokens $AddrTokens)
+    if (Test-ZoneIsNamedInternetZone -Zones $Zones -InternetZoneSet $InternetZoneSet) { return $true }
+    if (Test-AddressTouchesInternet -AddrTokens $AddrTokens) { return $true }
+    if ((Test-ZoneTouchesInternet -Zones $Zones -InternetZoneSet $InternetZoneSet) -and -not (Test-AddressIsExclusivelyPrivate -AddrTokens $AddrTokens)) { return $true }
+    return $false
 }
 
 # --------------------------------------------------------------------------
@@ -413,7 +479,7 @@ function Invoke-DeterministicChecks {
                 if ($rule.SrcZone -contains "any") { $broadDims += "source zone" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $broadDims += "source address" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $broadDims += "destination address (reaches the entire critical zone, not a specific host)" }
-                if ($null -eq $rule.Application) { $broadDims += "application" }
+                if ($null -eq $rule.Application -and $criticalServiceEffectivelyAny) { $broadDims += "application" }
                 if ($criticalServiceEffectivelyAny) { $broadDims += "service" }
                 if ($broadDims.Count -gt 0) {
                     $findings += [PSCustomObject]@{
@@ -436,7 +502,7 @@ function Invoke-DeterministicChecks {
                 if ($rule.DstZone -contains "any") { $egressBroadDims += "destination zone" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $egressBroadDims += "destination address" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $egressBroadDims += "source address (any host in the critical zone, not a specific one)" }
-                if ($null -eq $rule.Application) { $egressBroadDims += "application" }
+                if ($null -eq $rule.Application -and $egressServiceEffectivelyAny) { $egressBroadDims += "application" }
                 if ($egressServiceEffectivelyAny) { $egressBroadDims += "service" }
                 if ($egressBroadDims.Count -gt 0) {
                     $findings += [PSCustomObject]@{
@@ -470,7 +536,8 @@ function Invoke-DeterministicChecks {
             $matchedInTags = $tempKeywords | Where-Object { $tagTokens -contains $_ } | Select-Object -First 1
             $matchedKeyword = if ($matchedInName) { $matchedInName } else { $matchedInTags }
             $matchSource = if ($matchedInName -and $matchedInTags) { "both the rule name and its tags ('$($rule.Tags)')" } elseif ($matchedInName) { "the rule name itself" } else { "its tags ('$($rule.Tags)')" }
-            $isBroadRule = (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) -or (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) -or ($null -eq $rule.Application)
+            $tempTagServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
+            $isBroadRule = (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) -or (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) -or ($null -eq $rule.Application -and $tempTagServiceEffectivelyAny)
             if ($matchedKeyword -and $isBroadRule) {
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = "Medium"; Type = "temporary_tag_but_broad_rule"
@@ -639,7 +706,14 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        if (-not $srcIsInet -and $dstIsInet -and $null -ne $rule.DstAddr -and $null -eq $rule.Application) {
+        # Application=any only means "unrestricted" here when Service isn't
+        # separately pinning the traffic to a specific port: Application=any
+        # with Service=tcp/8080 is a port-based rule, not an open one, and
+        # that combination is already its own finding
+        # (port_based_rule_missing_app_id) rather than double-counted here.
+        # Same reasoning and same helper as internet_exposed_any_field's
+        # equivalent fix above.
+        if (-not $srcIsInet -and $dstIsInet -and $null -ne $rule.DstAddr -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "outbound_defined_dest_any_app"
                 Detail   = "Outbound to a defined destination ($($rule.DstAddrRaw)), but application/service is unrestricted (any). Consider scoping to the specific application(s) actually needed."
@@ -665,6 +739,25 @@ function Invoke-DeterministicChecks {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "outbound_risky_application"
                             Detail   = "Outbound rule permits a high-risk application ($($RiskyApplications[$app]), App-ID '$app') from source address='$($rule.SrcAddrRaw)' out to the internet. A potential data-exfiltration or tunneling channel if the source host is ever compromised. Verify this is intentional and scoped down if not."
+                        }
+                    }
+                }
+            }
+            # Some real exports use a custom-named Service object literally
+            # named after the protocol (e.g. a Service object called
+            # "smtp"), a pre-App-ID/legacy naming convention still seen in
+            # older rulebases. Get-ServicePorts below only recognizes the
+            # "tcp-<port>" naming pattern, so a token like this is
+            # otherwise invisible to any risky-protocol check; checked
+            # here as a literal name match against the same risky-app list
+            # Application uses above, not a port lookup.
+            if ($rule.Service) {
+                foreach ($svc in $rule.Service) {
+                    $matchedRiskyName = Test-ServiceNameImpliesRiskyApp -ServiceToken $svc -RiskyApplications $RiskyApplications
+                    if ($matchedRiskyName) {
+                        $findings += [PSCustomObject]@{
+                            RuleName = $rule.Name; Severity = "High"; Type = "outbound_risky_application"
+                            Detail   = "Outbound rule permits a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than App-ID) from source address='$($rule.SrcAddrRaw)' out to the internet. A potential data-exfiltration or tunneling channel if the source host is ever compromised. Verify this is intentional and scoped down if not."
                         }
                     }
                 }
@@ -727,6 +820,17 @@ function Invoke-DeterministicChecks {
                     }
                 }
             }
+            if ($rule.Service) {
+                foreach ($svc in $rule.Service) {
+                    $matchedRiskyName = Test-ServiceNameImpliesRiskyApp -ServiceToken $svc -RiskyApplications $RiskyApplications
+                    if ($matchedRiskyName) {
+                        $findings += [PSCustomObject]@{
+                            RuleName = $rule.Name; Severity = "Critical"; Type = "inbound_risky_application"
+                            Detail   = "Inbound from the internet using a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than App-ID) toward destination address='$($rule.DstAddrRaw)'. Verify this is intentional and scoped down (specific source IPs, MFA/VPN in front of it) if not."
+                        }
+                    }
+                }
+            }
             $ports = Get-ServicePorts -ServiceTokens $rule.Service
             foreach ($port in $ports) {
                 if ($RiskyPorts.ContainsKey($port)) {
@@ -758,7 +862,17 @@ function Invoke-DeterministicChecks {
             if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $anyDims += "source address" }
             if ($rule.DstZone -contains "any") { $anyDims += "destination zone" }
             if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $anyDims += "destination address" }
-            if ($null -eq $rule.Application) { $anyDims += "application" }
+            # Application counts as open only when Service doesn't already
+            # restrict things: Application=any with Service=any (or
+            # application-default with no app set) is genuinely
+            # unrestricted, but Application=any with Service pinned to a
+            # specific port (e.g. tcp/8080) is a port-based rule, not a
+            # wide-open one - that combination is what
+            # port_based_rule_missing_app_id already flags on its own
+            # terms (missing App-ID visibility), and double-counting it
+            # here as "application left unrestricted" would overstate how
+            # open the rule actually is.
+            if ($null -eq $rule.Application -and $serviceEffectivelyAny2) { $anyDims += "application" }
             if ($serviceEffectivelyAny2) { $anyDims += "service" }
             if ($anyDims.Count -gt 0) {
                 # Escalated to Critical when address, application, AND
@@ -785,12 +899,14 @@ function Invoke-DeterministicChecks {
         if (-not $srcIsInet -and -not $dstIsInet) {
             $srcEffectivelyAny = Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr
             $dstEffectivelyAny = Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr
-            if ($srcEffectivelyAny -or $dstEffectivelyAny -or $null -eq $rule.Application -or $null -eq $rule.Service) {
+            $internalServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
+            $internalAppEffectivelyOpen = $null -eq $rule.Application -and $internalServiceEffectivelyAny
+            if ($srcEffectivelyAny -or $dstEffectivelyAny -or $internalAppEffectivelyOpen -or $internalServiceEffectivelyAny) {
                 $broadDims = @()
                 if ($srcEffectivelyAny) { $broadDims += "source address" }
                 if ($dstEffectivelyAny) { $broadDims += "destination address" }
-                if ($null -eq $rule.Application) { $broadDims += "application" }
-                if ($null -eq $rule.Service) { $broadDims += "service" }
+                if ($internalAppEffectivelyOpen) { $broadDims += "application" }
+                if ($internalServiceEffectivelyAny) { $broadDims += "service" }
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = "Medium"; Type = "broad_internal_exposure"
                     Detail   = "Internal-to-internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) with $($broadDims -join '/') left unrestricted (any). A common lateral-movement/ransomware-propagation pattern even though neither side touches the internet."
@@ -804,6 +920,17 @@ function Invoke-DeterministicChecks {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "internal_risky_application"
                             Detail   = "Internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) allows a high-risk application ($($RiskyApplications[$app]), App-ID '$app'). Lateral-movement risk even though this doesn't touch the internet directly."
+                        }
+                    }
+                }
+            }
+            if ($rule.Service) {
+                foreach ($svc in $rule.Service) {
+                    $matchedRiskyName = Test-ServiceNameImpliesRiskyApp -ServiceToken $svc -RiskyApplications $RiskyApplications
+                    if ($matchedRiskyName) {
+                        $findings += [PSCustomObject]@{
+                            RuleName = $rule.Name; Severity = "High"; Type = "internal_risky_application"
+                            Detail   = "Internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) allows a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than App-ID). Lateral-movement risk even though this doesn't touch the internet directly."
                         }
                     }
                 }
@@ -1033,7 +1160,7 @@ function Invoke-DeterministicChecks {
         if ($rule.Disabled -or ($rule.Action -ne "deny" -and $rule.Action -ne "drop")) { continue }
         $srcCoversInternetZone = ($rule.SrcZone -contains "any") -or (($rule.SrcZone | Where-Object { $InternetZoneSet -contains $_.Trim().ToLower() }).Count -gt 0)
         $dstCoversInternetZone = ($rule.DstZone -contains "any") -or (($rule.DstZone | Where-Object { $InternetZoneSet -contains $_.Trim().ToLower() }).Count -gt 0)
-        if ($srcCoversInternetZone -and $dstCoversInternetZone -and $null -eq $rule.Application) {
+        if ($srcCoversInternetZone -and $dstCoversInternetZone -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
             $hasExplicitOutsideIntrazoneBlock = $true
             break
         }
@@ -1042,6 +1169,31 @@ function Invoke-DeterministicChecks {
         $findings += [PSCustomObject]@{
             RuleName = "(ruleset-wide)"; Severity = "Low"; Type = "missing_explicit_intrazone_internet_deny"
             Detail   = "No explicit block rule found for the internet-facing zone talking to itself (e.g. $($InternetZoneSet[0]) -> $($InternetZoneSet[0]), any application, drop). PAN-OS allows intrazone traffic by default unless a rule overrides it, unlike interzone traffic which is denied by default. Use 'drop', not 'deny': deny falls back to the matched application's own default deny behavior, which can still send a TCP reset or ICMP unreachable back, revealing that something is listening there. Drop silently discards the packet instead, giving an internet scanner nothing to work with."
+        }
+    }
+
+    # A handful of finding types have an obvious, context-free next step -
+    # the same suggestion applies no matter which specific rule triggered
+    # it. Filled in as a post-processing pass over the whole list rather
+    # than at each of the ~30 places a finding gets constructed above,
+    # since retrofitting every one of those individually would be far
+    # more invasive for the same result. Deliberately NOT covering types
+    # whose right answer depends on the specific rule's content (e.g. what
+    # to actually scope an any/any rule down to) - those are handled
+    # separately, optionally, by the AI step when the user opts in, and
+    # are never guessed at here.
+    $deterministicSuggestions = @{
+        "disabled_rule_present"        = "Candidate for removal. Confirm with the rule owner it's no longer needed, then delete."
+        "rule_usage_unused"            = "Candidate for removal. Confirm with the rule owner, then delete."
+        "stale_last_hit"               = "Candidate for removal. Confirm the access is still needed with the rule owner."
+        "duplicate_rule"                = "Remove this rule. Fully covered by an earlier rule with identical match criteria."
+        "shadowed_rule"                 = "Remove this rule. Never matches, fully covered by an earlier rule."
+        "temporary_tag_but_broad_rule"  = "Confirm with the rule owner whether still needed. If yes, narrow the scope; if no, remove."
+        "temporary_tag_still_present"   = "Confirm with the rule owner whether still needed. Remove the tag or the rule if stale."
+    }
+    foreach ($f in $findings) {
+        if ($deterministicSuggestions.ContainsKey($f.Type)) {
+            $f | Add-Member -NotePropertyName SuggestedFix -NotePropertyValue $deterministicSuggestions[$f.Type] -Force
         }
     }
 
