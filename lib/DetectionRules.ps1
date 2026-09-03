@@ -7,7 +7,7 @@
 
 $RiskyPorts = @{
     20 = "FTP-DATA"; 21 = "FTP"; 22 = "SSH"; 23 = "Telnet"; 24 = "Legacy/unassigned"
-    25 = "SMTP"; 69 = "TFTP"; 110 = "POP3"; 143 = "IMAP"; 161 = "SNMP v1/v2c"
+    25 = "SMTP"; 69 = "TFTP"; 80 = "HTTP"; 110 = "POP3"; 143 = "IMAP"; 161 = "SNMP v1/v2c"
     389 = "LDAP"; 445 = "SMB"; 512 = "Rexec"; 513 = "Rlogin"; 514 = "Rsh"
     853 = "DNS over TLS"; 1433 = "MSSQL"; 1521 = "Oracle DB"; 1723 = "PPTP"; 3306 = "MySQL"; 3389 = "RDP"
     5432 = "PostgreSQL"; 5900 = "VNC"; 6379 = "Redis"; 8443 = "HTTPS-Alt/Admin"
@@ -17,7 +17,7 @@ $RiskyPorts = @{
 # Ports that are unencrypted/cleartext by design (as opposed to "just risky
 # because it's a management/admin surface", e.g. SSH/RDP are encrypted but
 # still worth flagging as high-value targets). Used only to annotate findings.
-$CleartextPorts = @(20, 21, 23, 25, 69, 110, 143, 161, 389, 512, 513, 514)
+$CleartextPorts = @(20, 21, 23, 25, 69, 80, 110, 143, 161, 389, 512, 513, 514)
 
 # Well-known public DNS resolvers. Traffic reaching one of these directly
 # bypasses internal/corporate DNS, which matters regardless of whether the
@@ -476,7 +476,13 @@ function Invoke-DeterministicChecks {
             if ($dstIsCritical -and -not $srcIsCritical) {
                 $criticalServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
                 $broadDims = @()
-                if ($rule.SrcZone -contains "any") { $broadDims += "source zone" }
+                # Source zone only counts as unrestricted when the source
+                # address doesn't already narrow it down: zone="any" with a
+                # specific subnet in the address field means only hosts in
+                # that subnet can actually reach the critical zone, no
+                # matter how many zones the field nominally allows - PAN-OS
+                # matches zone and address together, not either alone.
+                if (($rule.SrcZone -contains "any") -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr)) { $broadDims += "source zone" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $broadDims += "source address" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $broadDims += "destination address (reaches the entire critical zone, not a specific host)" }
                 if ($null -eq $rule.Application -and $criticalServiceEffectivelyAny) { $broadDims += "application" }
@@ -499,7 +505,7 @@ function Invoke-DeterministicChecks {
             if ($srcIsCritical -and -not $dstIsCritical) {
                 $egressServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
                 $egressBroadDims = @()
-                if ($rule.DstZone -contains "any") { $egressBroadDims += "destination zone" }
+                if (($rule.DstZone -contains "any") -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr)) { $egressBroadDims += "destination zone" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $egressBroadDims += "destination address" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $egressBroadDims += "source address (any host in the critical zone, not a specific one)" }
                 if ($null -eq $rule.Application -and $egressServiceEffectivelyAny) { $egressBroadDims += "application" }
@@ -858,9 +864,9 @@ function Invoke-DeterministicChecks {
         if ($rule.Action -eq "allow" -and ($srcIsInet -or $dstIsInet)) {
             $serviceEffectivelyAny2 = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
             $anyDims = @()
-            if ($rule.SrcZone -contains "any") { $anyDims += "source zone" }
+            if (($rule.SrcZone -contains "any") -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr)) { $anyDims += "source zone" }
             if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $anyDims += "source address" }
-            if ($rule.DstZone -contains "any") { $anyDims += "destination zone" }
+            if (($rule.DstZone -contains "any") -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr)) { $anyDims += "destination zone" }
             if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $anyDims += "destination address" }
             # Application counts as open only when Service doesn't already
             # restrict things: Application=any with Service=any (or
@@ -1172,16 +1178,23 @@ function Invoke-DeterministicChecks {
         }
     }
 
+    return $findings
+}
+
+function Add-DeterministicSuggestedFixes {
     # A handful of finding types have an obvious, context-free next step -
     # the same suggestion applies no matter which specific rule triggered
-    # it. Filled in as a post-processing pass over the whole list rather
-    # than at each of the ~30 places a finding gets constructed above,
-    # since retrofitting every one of those individually would be far
-    # more invasive for the same result. Deliberately NOT covering types
-    # whose right answer depends on the specific rule's content (e.g. what
-    # to actually scope an any/any rule down to) - those are handled
-    # separately, optionally, by the AI step when the user opts in, and
-    # are never guessed at here.
+    # it. Deliberately NOT covering types whose right answer depends on
+    # the specific rule's content (e.g. what to actually scope an any/any
+    # rule down to) - those are handled separately by the AI step instead.
+    #
+    # Only called when the user has actually agreed to the Gemini step
+    # (see MooseAlto.ps1), not unconditionally from
+    # Invoke-DeterministicChecks: the Suggested Fix column is meant to be
+    # an all-or-nothing thing tied to that one conscious choice, not a
+    # column that silently appears with partial content on every run
+    # regardless of whether AI is being used at all.
+    param([array]$Findings)
     $deterministicSuggestions = @{
         "disabled_rule_present"        = "Candidate for removal. Confirm with the rule owner it's no longer needed, then delete."
         "rule_usage_unused"            = "Candidate for removal. Confirm with the rule owner, then delete."
@@ -1191,13 +1204,11 @@ function Invoke-DeterministicChecks {
         "temporary_tag_but_broad_rule"  = "Confirm with the rule owner whether still needed. If yes, narrow the scope; if no, remove."
         "temporary_tag_still_present"   = "Confirm with the rule owner whether still needed. Remove the tag or the rule if stale."
     }
-    foreach ($f in $findings) {
+    foreach ($f in $Findings) {
         if ($deterministicSuggestions.ContainsKey($f.Type)) {
             $f | Add-Member -NotePropertyName SuggestedFix -NotePropertyValue $deterministicSuggestions[$f.Type] -Force
         }
     }
-
-    return $findings
 }
 
 function Build-InternetExposureInventory {
