@@ -73,13 +73,21 @@ internet, via zone name or a concrete public IP):
   but still deserves to show up as "this rule reaches the internet" for
   the same contextual reason the inbound side does.
 - `inbound_risky_application` / `inbound_risky_port`: inbound-from-internet
-  rule matching a high-risk port or App-ID (see list below)
+  rule matching a high-risk port or App-ID (see list below). Also fires
+  on a Service field literally named after a risky application (e.g. a
+  Service object called "smtp", a pre-App-ID naming convention still
+  seen on real rulebases), including a name with a port or other suffix
+  appended (e.g. "smtp-25").
 - `outbound_risky_application` / `outbound_risky_port`: same high-risk
   port/App-ID list, but for a purely outbound rule (source internal,
   destination internet). An internal host allowed to
   run RDP/SSH/Telnet out to arbitrary internet destinations is a real
   concern in its own right: a data-exfiltration or tunneling channel if
   that host is ever compromised, not just an internet-exposure question.
+  Also fires on a Service field literally named after a risky
+  application (e.g. a Service object called "smtp", a pre-App-ID naming
+  convention still seen on real rulebases), including a name with a
+  port or other suffix appended (e.g. "smtp-25").
 - `outbound_icmp_to_unrestricted_destination`: outbound rule permits ICMP-family traffic (App-ID ping, icmp, ipv6-icmp, or traceroute, or a Service object literally named icmp as a fallback) to an unrestricted destination (any, or effectively any via the RFC1918 idiom). ICMP is often overlooked by inspection compared to TCP/UDP traffic; data can be encoded in echo/payload fields to exfiltrate data or maintain a covert C2 channel. Not flagged when the destination is scoped to specific, known hosts, since that's ordinary reachability testing rather than this pattern.
 - `outbound_any_public_defined_app`: destination is any/internet-facing,
   but application is at least restricted (narrower than fully open, still
@@ -136,7 +144,10 @@ default since this is entirely org-specific):
   lateral-movement / ransomware-propagation pattern
 - `internal_risky_application` / `internal_risky_port`: same
   high-risk port/App-ID list as the inbound checks, applied to purely
-  internal traffic.
+  internal traffic. Also fires on a Service field literally named
+  after a risky application (e.g. a Service object called "smtp", a
+  pre-App-ID naming convention still seen on real rulebases), including
+  a name with a port or other suffix appended (e.g. "smtp-25").
 - `all_rfc1918_effectively_private`: an address field lists all three
   private RFC1918 ranges positively together (e.g.
   `10.0.0.0/8;172.16.0.0/12;192.168.0.0/16`), functionally equivalent to
@@ -254,12 +265,12 @@ entries, most identified by URL rather than a fixed IP anyway, since DoH
 by nature is usually reached by hostname over ordinary HTTPS).
 
 **High-risk ports checked:** 20/21 (FTP), 22 (SSH), 23 (Telnet), 25 (SMTP),
-69 (TFTP), 110 (POP3), 143 (IMAP), 161 (SNMP v1/v2c), 389 (LDAP), 445 (SMB),
+69 (TFTP), 80 (HTTP), 110 (POP3), 143 (IMAP), 161 (SNMP v1/v2c), 389 (LDAP), 445 (SMB),
 512/513/514 (Rexec/Rlogin/Rsh), 853 (DNS over TLS), 1433 (MSSQL), 1521 (Oracle DB), 1723 (PPTP),
 3306 (MySQL), 3389 (RDP), 5432 (PostgreSQL), 5900 (VNC), 6379 (Redis),
 8443 (HTTPS-Alt/Admin), 9200 (Elasticsearch), 27017 (MongoDB). Findings
 explicitly flag which of these are **unencrypted/cleartext by design**
-(FTP, Telnet, TFTP, POP3, IMAP, SNMP v1/v2c, Rexec/Rlogin/Rsh) versus
+(FTP, Telnet, TFTP, HTTP, POP3, IMAP, SNMP v1/v2c, Rexec/Rlogin/Rsh) versus
 encrypted-but-still-risky management surfaces (SSH, RDP) or a different
 concern entirely (DNS over TLS is encrypted, flagged because it bypasses
 DNS-based security controls, not because it's insecure).
@@ -287,6 +298,30 @@ are now resolved no longer have a row in the current run, so they're
 added back in from the previous CSV and sorted into the table by severity
 alongside everything else, rather than listed separately. A summary card
 above the table shows the New/Resolved/Still-present counts at a glance.
+
+## Suggested fixes
+
+The Algorithmic-based Findings table gets an extra **Suggested Fix**
+column, shown only when the optional Gemini step actually runs (see
+AI-assisted analysis above). It doesn't appear on a purely offline run,
+even though a handful of finding types have an obvious, deterministic
+suggestion that doesn't strictly need AI: it's an all-or-nothing choice
+tied to that one conscious opt-in, not a column that silently shows
+partial content regardless of whether AI is being used.
+
+Once Gemini runs, deterministic suggestions get filled in for
+`disabled_rule_present`, `rule_usage_unused`, `stale_last_hit`
+(candidates for removal, confirm with the rule owner), `duplicate_rule`
+/ `shadowed_rule` (remove, covered by an earlier rule), and
+`temporary_tag_but_broad_rule` / `temporary_tag_still_present` (confirm
+still needed, remove tag or rule if not). The same Gemini call also asks
+for a plausible App-ID guess specifically for `any_any_any_allow`,
+`outbound_defined_dest_any_app`, and `port_based_rule_missing_app_id`
+findings, based on the rule's name, its Tags (if included), and any port
+already visible in the finding text. These are clearly prefixed "AI
+guess (verify):" and are never applied automatically. If nothing in the
+rule name/tags/port gives a real hint, that finding is left without a
+suggestion rather than guessing something generic.
 
 ## Internet Exposure Inventory
 
@@ -586,6 +621,17 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
   interface, pass `-InternetZones` explicitly, or internet-exposure checks
   will under-report.
 - **IPv4 only.** Containment (used by shadow/duplicate detection) does real interval math for plain CIDR/IP and "IP-IP" ranges, including mixing the two (e.g. correctly detecting that a range is fully inside a broader CIDR). A [Negate] X broader side (or multiple, which combine with AND semantics, matching only if the address avoids all of them) is also handled against a plain CIDR/range narrower side: covered if the narrower interval has zero overlap with every excluded range. Two narrower cases still fall back to exact string match rather than true containment: a [Negate] narrower side (rare enough in practice not to be worth the added complexity), and comparing two different negated expressions to each other (identical ones still match exactly, just not a genuinely different-but-overlapping pair). Address-object names are also exact-match, but only actually matters when -AddressObjectsCsv isn't supplied: when it is, names are resolved to real addresses before any comparison happens.
+- **Direction- and exposure-related checks treat zone="any" as weaker
+  evidence than a specifically-named zone.** If the address field on
+  that same side is exclusively a plain, non-negated, specific
+  IP/CIDR (private or otherwise), that address overrides a zone="any"
+  signal, since PAN-OS matches zone and address together on a rule, not
+  either alone. Applies to direction classification and to
+  `unrestricted_access_to_critical_zone`,
+  `unrestricted_egress_from_critical_zone`, and
+  `internet_exposed_any_field`. A specifically-named zone (e.g.
+  Untrust, or a configured critical zone) is trusted as-is regardless of
+  address.
 - **This is a hygiene review aid, not an authoritative security audit.**
   Always have a human review findings, especially `shadowed_rule` and
   anything touching the internet, before changing production policy.
