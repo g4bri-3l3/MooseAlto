@@ -119,7 +119,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "1.6"
+$script:MooseAltoVersion = "1.7"
 
 function Show-Banner {
     $lines = @(
@@ -421,6 +421,15 @@ Write-Host "Sending $($findingsToSend.Count) finding(s) ($(if ($sendOnlyInternet
 $llmResult = Invoke-GeminiNarrative -UserPrompt $userPrompt -ApiKey $ApiKey -Model $Model
 
 if ($llmResult) {
+    # Deterministic suggestions (see Add-DeterministicSuggestedFixes in
+    # DetectionRules.ps1) are applied here, only when the user actually
+    # went through the Gemini step, not unconditionally right after
+    # detection runs. The Suggested Fix column is meant to be an
+    # all-or-nothing thing tied to that one conscious choice, not a
+    # column that silently shows partial content on every offline run
+    # regardless of whether AI is being used at all.
+    Add-DeterministicSuggestedFixes -Findings $findings
+
     # Apply any AI-guessed Application suggestions back onto the matching
     # findings BEFORE rebuilding the report, so they show up in the
     # Suggested Fix column itself rather than only in a separate summary
@@ -433,24 +442,21 @@ if ($llmResult) {
     # alone.
     if ($llmResult.application_suggestions) {
         $eligibleSuggestionTypes = @("any_any_any_allow", "outbound_defined_dest_any_app", "port_based_rule_missing_app_id")
-        $appliedCount = 0
         foreach ($sugg in $llmResult.application_suggestions) {
             if ($eligibleSuggestionTypes -notcontains $sugg.type) { continue }
             $matchingFinding = $findings | Where-Object { $_.RuleName -eq $sugg.rule_name -and $_.Type -eq $sugg.type } | Select-Object -First 1
             if ($matchingFinding) {
                 $suggestionText = "AI guess (verify): App-ID '$($sugg.suggested_application)'. $($sugg.reasoning)"
                 $matchingFinding | Add-Member -NotePropertyName SuggestedFix -NotePropertyValue $suggestionText -Force
-                $appliedCount++
             }
         }
-        if ($appliedCount -gt 0) {
-            # The Findings table was already rendered to text once above;
-            # there's no cheaper way to get these into its Suggested Fix
-            # column than re-running the same render call now that some
-            # findings carry an updated value.
-            $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
-        }
     }
+
+    # The Findings table was already rendered to text once above; there's
+    # no cheaper way to get the Suggested Fix column populated (both the
+    # deterministic entries just applied and any AI ones) than re-running
+    # the same render call now that findings carry updated values.
+    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
 
     $aiLines = @("", "## AI-Assisted Summary (Gemini, IP addresses masked before sending)", "")
     $aiLines += $llmResult.executive_summary
