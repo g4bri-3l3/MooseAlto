@@ -119,7 +119,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "1.7"
+$script:MooseAltoVersion = "1.8"
 
 function Show-Banner {
     $lines = @(
@@ -230,6 +230,76 @@ if (-not $InputCsv) {
         if ($inputVal) { $ApiKey = $inputVal }
     }
 
+    # Review-and-edit loop, once the guided pass above has a full set of
+    # answers: enough parameters exist now that reviewing them all in one
+    # place before committing is genuinely useful, not just "answer once,
+    # restart the whole script if something's wrong." Same spirit as
+    # Metasploit's show options / set X / run, minus the module system -
+    # there's only ever one "module" here.
+    $paramOrder = @("InputCsv", "OutHtml", "OutCsv", "InternetZones", "CriticalZones", "AddressObjectsCsv", "AddressGroupsCsv", "StaleHitDays", "MaxAddressListSize", "CompareTo", "SkipLLM")
+    if (-not $SkipLLM) { $paramOrder += "ApiKey" }
+    $paramPrompts = @{
+        InputCsv            = "CSV file to analyze"
+        OutHtml              = "HTML report path"
+        OutCsv               = "Findings CSV path"
+        InternetZones        = "Internet-facing zone names, comma-separated"
+        CriticalZones        = "Critical zone names, comma-separated"
+        AddressObjectsCsv    = "Address Objects CSV path"
+        AddressGroupsCsv     = "Address Groups CSV path"
+        StaleHitDays         = "Days since last hit to flag a rule as stale"
+        MaxAddressListSize   = "Max individual addresses before flagging oversized"
+        CompareTo            = "Previous findings CSV to compare against"
+        SkipLLM              = "Skip AI analysis entirely (y/N)"
+        ApiKey               = "Gemini API key"
+    }
+
+    while ($true) {
+        Write-Host ""
+        Write-Host "Current settings:" -ForegroundColor Cyan
+        for ($pi = 0; $pi -lt $paramOrder.Count; $pi++) {
+            $pname = $paramOrder[$pi]
+            $val = Get-Variable -Name $pname -ValueOnly
+            $displayVal =
+                if ($pname -eq "ApiKey" -and $val) { "*" * 8 }
+                elseif ($pname -eq "SkipLLM") { if ($val) { "Yes" } else { "No" } }
+                elseif (-not $val) { "(none)" }
+                else { $val }
+            Write-Host ("  {0,2}. {1,-20} {2}" -f ($pi + 1), $pname, $displayVal)
+        }
+        Write-Host ""
+        $editChoice = Read-Host "Type a number or name to change a setting, or press Enter to run"
+        if (-not $editChoice) { break }
+
+        $targetName = $null
+        if ($editChoice -match '^\d+$') {
+            $idx = [int]$editChoice - 1
+            if ($idx -ge 0 -and $idx -lt $paramOrder.Count) { $targetName = $paramOrder[$idx] }
+        }
+        else {
+            $targetName = $paramOrder | Where-Object { $_ -ieq $editChoice.Trim() } | Select-Object -First 1
+        }
+        if (-not $targetName) {
+            Write-Host "Not a recognized setting. Use a number from the list above." -ForegroundColor Yellow
+            continue
+        }
+
+        $currentVal = Get-Variable -Name $targetName -ValueOnly
+        $newVal = Read-Host "$($paramPrompts[$targetName]) [$currentVal]"
+        if (-not $newVal) { continue }
+
+        if ($targetName -in @("StaleHitDays", "MaxAddressListSize")) {
+            if ($newVal -match '^\d+$') { Set-Variable -Name $targetName -Value ([int]$newVal) }
+            else { Write-Host "Must be a whole number, ignored." -ForegroundColor Yellow }
+        }
+        elseif ($targetName -eq "SkipLLM") {
+            Set-Variable -Name $targetName -Value ($newVal -match '^[Yy]')
+            if (-not $SkipLLM -and $paramOrder -notcontains "ApiKey") { $paramOrder += "ApiKey" }
+        }
+        else {
+            Set-Variable -Name $targetName -Value $newVal
+        }
+    }
+
     Write-Host ""
 }
 
@@ -299,6 +369,12 @@ if ($addressObjects.Count -gt 0 -or $addressGroups.Count -gt 0) {
 $findings = Invoke-DeterministicChecks -Rules $rules -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize
 $inventory = Build-InternetExposureInventory -Rules $rules -InternetZoneSet $InternetZoneSet
 
+# Attack-path analysis: pure graph search over the ruleset, no AI
+# involved in finding the paths themselves (only, optionally, in
+# narrating them afterward - see the Gemini section below). Scales with
+# ruleset size the same way the rest of detection does, no separate cap.
+$attackPaths = Find-AttackPaths -Rules $rules -Findings $findings -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet
+
 Export-FindingsCsv -Findings $findings -Rules $rules -CsvPath $OutCsv
 if ($OutCsv -match '\.csv$') {
     $inventoryCsvPath = $OutCsv -replace '\.csv$', '_inventory.csv'
@@ -317,7 +393,7 @@ Export-InventoryCsv -Inventory $inventory -CsvPath $inventoryCsvPath
 $processingElapsed = (Get-Date) - $processingStartTime
 $elapsedText = if ($processingElapsed.TotalMinutes -ge 1) { "{0}m {1}s" -f [int]$processingElapsed.TotalMinutes, $processingElapsed.Seconds } else { "{0:N1}s" -f $processingElapsed.TotalSeconds }
 
-$reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
+$reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM -AttackPaths $attackPaths
 Save-HtmlReport -MarkdownLines $reportLines -HtmlPath $OutHtml
 
 Write-Host "Report written to $OutHtml" -ForegroundColor Green
@@ -386,39 +462,154 @@ if ($findingsToSend.Count -eq 0) {
     return
 }
 
-# 4) Mask every IP/CIDR in the finding details before building the outbound prompt.
+# 4) Mask every IP/CIDR in the finding details before building the outbound
+# prompt(s). $ipMap is shared across every batch below (never reset
+# per-batch) so the same real IP always gets the same placeholder
+# wherever it reappears, keeping any address-based correlation (e.g.
+# attack path steps sharing an address with a finding) intact even when
+# findings are split across multiple calls.
 $ipMap = @{}
-$maskedLines = @("Deterministic findings:")
-foreach ($f in $findingsToSend) {
-    $maskedDetail = Protect-IPAddresses -Text $f.Detail -Map $ipMap
-    $maskedLines += "- [$($f.Severity)] $($f.RuleName) ($($f.Type)): $maskedDetail"
-}
 
 # 4b) Tags are separate free text written by whoever maintains the ruleset -
 # could contain project codenames, ticket numbers, or other internal notes.
 # Ask separately before including them, rather than sending them by default.
 $includeTags = $false
 $tagsAnswer = Read-Host "Also include rule Tags in the prompt sent to Gemini? They may contain sensitive information (Y/N)"
-if ($tagsAnswer -match '^[Yy]') {
-    $includeTags = $true
-    $flaggedRuleNames = @($findingsToSend | Select-Object -ExpandProperty RuleName -Unique)
-    $tagsLines = @("", "Tags for the rules above (as additional context only):")
-    foreach ($rn in $flaggedRuleNames) {
-        $matchingRule = $rules | Where-Object { $_.Name -eq $rn } | Select-Object -First 1
-        if ($matchingRule -and $matchingRule.Tags) {
-            $tagsLines += "- $rn`: $($matchingRule.Tags)"
-        }
+if ($tagsAnswer -match '^[Yy]') { $includeTags = $true }
+
+# 4c) Attack paths are already computed locally either way (see the report
+# regardless of this answer) - this only controls whether that zone-to-zone
+# topology (zone names, which rules connect them) also gets sent to Gemini
+# for a plausibility/severity write-up. It's a different kind of exposure
+# than an individual finding: it's a synthesis of network shape, not one
+# isolated fact, so it gets its own opt-in rather than riding along with
+# the findings by default.
+$includeAttackPaths = $false
+if ($attackPaths.Count -gt 0) {
+    $pathsAnswer = Read-Host "$($attackPaths.Count) attack path(s) were found locally (always shown in the report). Also send them to Gemini for an AI plausibility/severity write-up? (Y/N)"
+    if ($pathsAnswer -match '^[Yy]') { $includeAttackPaths = $true }
+}
+
+# 5) A large ruleset can produce enough findings to exceed Gemini's
+# free-tier per-minute input-token quota in a single request (seen in
+# practice around ~4,000 rules). Rather than fail outright, split into
+# multiple smaller calls and merge the results - each batch stays
+# comfortably under the limit regardless of total ruleset size. The
+# character-count threshold is a rough proxy for token count (roughly 4
+# chars/token for English text), kept deliberately conservative so the
+# estimate being imprecise doesn't accidentally produce an oversized
+# batch. The tradeoff: remediation ordering is well-ordered within each
+# batch, but batches are simply concatenated after, not globally
+# re-prioritized against each other.
+$targetCharsPerBatch = 300000
+$batches = New-Object System.Collections.Generic.List[System.Collections.Generic.List[PSCustomObject]]
+$currentBatch = New-Object System.Collections.Generic.List[PSCustomObject]
+$currentBatchChars = 0
+foreach ($f in $findingsToSend) {
+    $lineLength = $f.Detail.Length + $f.RuleName.Length + $f.Type.Length + 20
+    if ($currentBatch.Count -gt 0 -and ($currentBatchChars + $lineLength) -gt $targetCharsPerBatch) {
+        $batches.Add($currentBatch)
+        $currentBatch = New-Object System.Collections.Generic.List[PSCustomObject]
+        $currentBatchChars = 0
     }
-    if ($tagsLines.Count -gt 1) {
-        $maskedLines += $tagsLines
+    $currentBatch.Add($f)
+    $currentBatchChars += $lineLength
+}
+if ($currentBatch.Count -gt 0) { $batches.Add($currentBatch) }
+
+if ($batches.Count -gt 1) {
+    Write-Host "Note: $($findingsToSend.Count) findings is large enough to risk exceeding Gemini's per-request quota. Splitting into $($batches.Count) batches sent one after another; this takes longer but avoids a single oversized request failing outright." -ForegroundColor Yellow
+}
+
+$mergedResult = [PSCustomObject]@{
+    executive_summary        = ""
+    remediation_order        = @()
+    application_suggestions  = @()
+    mitre_mappings           = @()
+    attack_path_assessments  = @()
+}
+$executiveSummaries = @()
+
+for ($bi = 0; $bi -lt $batches.Count; $bi++) {
+    $batch = $batches[$bi]
+    $maskedLines = @("Deterministic findings" + $(if ($batches.Count -gt 1) { " (batch $($bi + 1) of $($batches.Count))" } else { "" }) + ":")
+    foreach ($f in $batch) {
+        $maskedDetail = Protect-IPAddresses -Text $f.Detail -Map $ipMap
+        $maskedLines += "- [$($f.Severity)] $($f.RuleName) ($($f.Type)): $maskedDetail"
+    }
+
+    if ($includeTags) {
+        $flaggedRuleNames = @($batch | Select-Object -ExpandProperty RuleName -Unique)
+        $tagsLines = @("", "Tags for the rules above (as additional context only):")
+        foreach ($rn in $flaggedRuleNames) {
+            $matchingRule = $rules | Where-Object { $_.Name -eq $rn } | Select-Object -First 1
+            if ($matchingRule -and $matchingRule.Tags) {
+                $tagsLines += "- $rn`: $($matchingRule.Tags)"
+            }
+        }
+        if ($tagsLines.Count -gt 1) { $maskedLines += $tagsLines }
+    }
+
+    # Sent once, with the first batch only - attack paths are independent
+    # of any single findings batch, so repeating them in every batch would
+    # just waste tokens re-sending the same data.
+    if ($bi -eq 0 -and $includeAttackPaths) {
+        $pathLines = @("", "Attack Paths (already computed via graph search, zone-to-zone reachability - not something to recompute or second-guess):")
+        for ($pi = 0; $pi -lt $attackPaths.Count; $pi++) {
+            $p = $attackPaths[$pi]
+            $nodes = @($p.Steps[0].From) + @($p.Steps | ForEach-Object { $_.To })
+            $displayNodes = $nodes | ForEach-Object { if ($_ -eq "(internet)") { "Internet" } else { $_ } }
+            $chainText = ($displayNodes -join " -> ")
+            $rulesInvolved = ($p.Steps | ForEach-Object { $_.RuleName }) -join ", "
+            $pathLines += "- path_index ${pi}: $chainText (rules: $rulesInvolved)"
+        }
+        $maskedLines += $pathLines
+    }
+
+    $userPrompt = $maskedLines -join "`n"
+    $batchLabel = if ($batches.Count -gt 1) { " (batch $($bi + 1)/$($batches.Count))" } else { "" }
+    Write-Host "Sending $($batch.Count) finding(s)$batchLabel ($(if ($sendOnlyInternet) { 'internet-only' } else { 'all' })), $($ipMap.Count) masked IP address(es) total to Gemini$(if ($includeTags) { ' (Tags included)' } else { ' (Tags excluded)' })..."
+
+    $batchResult = Invoke-GeminiNarrative -UserPrompt $userPrompt -ApiKey $ApiKey -Model $Model
+
+    if (-not $batchResult) {
+        Write-Host "Batch $($bi + 1) failed; continuing with the remaining batches (if any)." -ForegroundColor Yellow
+        continue
+    }
+
+    if ($batchResult.executive_summary) { $executiveSummaries += $batchResult.executive_summary }
+    if ($batchResult.remediation_order) { $mergedResult.remediation_order = @($mergedResult.remediation_order) + @($batchResult.remediation_order) }
+    if ($batchResult.application_suggestions) { $mergedResult.application_suggestions = @($mergedResult.application_suggestions) + @($batchResult.application_suggestions) }
+    if ($batchResult.mitre_mappings) { $mergedResult.mitre_mappings = @($mergedResult.mitre_mappings) + @($batchResult.mitre_mappings) }
+    if ($batchResult.attack_path_assessments) { $mergedResult.attack_path_assessments = @($mergedResult.attack_path_assessments) + @($batchResult.attack_path_assessments) }
+
+    # A short pause between batches, not just retry-on-failure within one:
+    # free-tier quotas are also rate-limited per minute, and firing several
+    # large requests back-to-back risks tripping that even when each one
+    # individually fits under the token ceiling.
+    # A short pause isn't enough here: the free-tier quota that matters
+    # ("...InputTokensPerModelPerMinute") is cumulative across a rolling
+    # 60-second window, not a per-request ceiling. Sending several
+    # comfortably-sized batches only a few seconds apart still sums
+    # their tokens into the SAME window and can trip the same 429 this
+    # batching was meant to avoid. Waiting past 60 seconds between
+    # batches means each one lands in a fresh window instead.
+    if ($bi -lt $batches.Count - 1) {
+        Write-Host "Waiting 65s before the next batch (Gemini's free-tier quota is per-minute, not per-request)..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 65
     }
 }
 
-$userPrompt = $maskedLines -join "`n"
+if ($executiveSummaries.Count -eq 0) {
+    Write-Host "ERROR: Gemini call failed for every batch. Deterministic report already saved to $OutHtml; no AI section added." -ForegroundColor Red
+    return
+}
 
-Write-Host "Sending $($findingsToSend.Count) finding(s) ($(if ($sendOnlyInternet) { 'internet-only' } else { 'all' })), $($ipMap.Count) masked IP address(es) to Gemini$(if ($includeTags) { ' (Tags included)' } else { ' (Tags excluded)' })..."
+$mergedResult.executive_summary =
+    if ($executiveSummaries.Count -eq 1) { $executiveSummaries[0] }
+    else { ($executiveSummaries | ForEach-Object { $_ }) -join "`n`n" }
 
-$llmResult = Invoke-GeminiNarrative -UserPrompt $userPrompt -ApiKey $ApiKey -Model $Model
+$llmResult = $mergedResult
 
 if ($llmResult) {
     # Deterministic suggestions (see Add-DeterministicSuggestedFixes in
@@ -452,11 +643,36 @@ if ($llmResult) {
         }
     }
 
+    # MITRE ATT&CK tags, matched the same way as the Application
+    # suggestions above: by (rule name, type), applied only to a finding
+    # that actually exists with that exact key, never blindly trusted.
+    if ($llmResult.mitre_mappings) {
+        foreach ($mapping in $llmResult.mitre_mappings) {
+            $matchingFinding = $findings | Where-Object { $_.RuleName -eq $mapping.rule_name -and $_.Type -eq $mapping.type } | Select-Object -First 1
+            if ($matchingFinding) {
+                $mitreText = "$($mapping.technique_id) $($mapping.technique_name) ($($mapping.tactic))"
+                $matchingFinding | Add-Member -NotePropertyName MitreTag -NotePropertyValue $mitreText -Force
+            }
+        }
+    }
+
+    # Attack-path assessments, matched by the same path_index given in the
+    # prompt - the $attackPaths array's order is exactly what was sent, so
+    # the index maps back directly to the same array position.
+    if ($llmResult.attack_path_assessments) {
+        foreach ($assessment in $llmResult.attack_path_assessments) {
+            $idx = [int]$assessment.path_index
+            if ($idx -ge 0 -and $idx -lt $attackPaths.Count) {
+                $attackPaths[$idx] | Add-Member -NotePropertyName Assessment -NotePropertyValue $assessment.assessment -Force
+            }
+        }
+    }
+
     # The Findings table was already rendered to text once above; there's
     # no cheaper way to get the Suggested Fix column populated (both the
     # deterministic entries just applied and any AI ones) than re-running
     # the same render call now that findings carry updated values.
-    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
+    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM -AttackPaths $attackPaths
 
     $aiLines = @("", "## AI-Assisted Summary (Gemini, IP addresses masked before sending)", "")
     $aiLines += $llmResult.executive_summary
