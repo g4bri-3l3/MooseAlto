@@ -294,6 +294,7 @@ function Test-SideIsInternet {
 # Deterministic checks
 # --------------------------------------------------------------------------
 
+
 function Invoke-DeterministicChecks {
     param([array]$Rules, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25)
     $findings = @()
@@ -1260,4 +1261,271 @@ function Build-InternetExposureInventory {
         }
     }
     return $inventory
+}
+
+function Build-ZoneReachabilityGraph {
+    # A directed graph of zone-to-zone reachability: one edge per
+    # (source-zone, destination-zone) pair an enabled allow rule actually
+    # permits. Which zones can reach which other zones is a deterministic
+    # fact of the ruleset, a pure graph-traversal problem - nothing here
+    # needs AI to discover. The optional AI step later only narrates
+    # paths already found this way, it never has to search for them
+    # itself, which is also why this scales to any ruleset size: it's the
+    # same cost whether there are 30 rules or 20,000.
+    #
+    # "any" as a zone is expanded inline, per rule, into the full list of
+    # real zone names seen anywhere in the ruleset (collected in a first
+    # pass before this one), rather than modeled as a shared pass-through
+    # node. A shared "(any)" node was tried first and produces a lot of
+    # noise: two real zones that already have a direct rule between them
+    # would ALSO show as connected via a redundant "detour" through
+    # "(any)", for every unrelated zone=any rule anywhere in the whole
+    # ruleset, not just the one that's actually relevant. Expanding
+    # inline means each edge still traces back to one specific real rule,
+    # not a generic "any matches any" fact that duplicates real edges.
+    #
+    # A "(internet)" virtual node represents the internet as a whole,
+    # connected via the same Test-SideIsInternet used everywhere else in
+    # this file, not a separate zone-name check - so a rule scoped to
+    # zone="any" but an exclusively private address correctly does NOT
+    # create an edge to/from "(internet)", consistent with every other
+    # check in this session.
+    param([array]$Rules, [array]$InternetZoneSet, [hashtable]$SeverityByRule = @{})
+
+    $realZones = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($rule in $Rules) {
+        if ($rule.Disabled -or $rule.Action -ne "allow") { continue }
+        foreach ($z in $rule.SrcZone) { $zl = $z.Trim().ToLower(); if ($zl -ne "any") { [void]$realZones.Add($zl) } }
+        foreach ($z in $rule.DstZone) { $zl = $z.Trim().ToLower(); if ($zl -ne "any") { [void]$realZones.Add($zl) } }
+    }
+
+    $edges = New-Object System.Collections.Generic.List[PSCustomObject]
+
+    foreach ($rule in $Rules) {
+        if ($rule.Disabled -or $rule.Action -ne "allow") { continue }
+
+        $srcIsInet = Test-SideIsInternet -Zones $rule.SrcZone -AddrTokens $rule.SrcAddr -InternetZoneSet $InternetZoneSet
+        $dstIsInet = Test-SideIsInternet -Zones $rule.DstZone -AddrTokens $rule.DstAddr -InternetZoneSet $InternetZoneSet
+
+        $srcNodes = New-Object System.Collections.Generic.List[string]
+        $srcHasAny = @($rule.SrcZone | ForEach-Object { $_.Trim().ToLower() }) -contains "any"
+        if ($srcHasAny) { foreach ($z in $realZones) { $srcNodes.Add($z) } }
+        else { foreach ($z in $rule.SrcZone) { $srcNodes.Add($z.Trim().ToLower()) } }
+        if ($srcIsInet) { $srcNodes.Add("(internet)") }
+
+        $dstNodes = New-Object System.Collections.Generic.List[string]
+        $dstHasAny = @($rule.DstZone | ForEach-Object { $_.Trim().ToLower() }) -contains "any"
+        if ($dstHasAny) { foreach ($z in $realZones) { $dstNodes.Add($z) } }
+        else { foreach ($z in $rule.DstZone) { $dstNodes.Add($z.Trim().ToLower()) } }
+        if ($dstIsInet) { $dstNodes.Add("(internet)") }
+
+        foreach ($s in $srcNodes) {
+            foreach ($d in $dstNodes) {
+                if ($s -eq $d) { continue }
+                $edges.Add([PSCustomObject]@{
+                    From        = $s; To = $d; RuleName = $rule.Name
+                    Application = if ($rule.Application) { $rule.Application -join "," } else { "any" }
+                })
+            }
+        }
+    }
+
+    # Multiple rules often connect the same zone pair (several any/any-ish
+    # rules especially), which would otherwise make the path search
+    # explore many parallel edges that all represent the same effective
+    # zone-to-zone connectivity, just via a different rule name - a real
+    # cost blow-up on a ruleset with a lot of broad rules, for paths that
+    # would look identical except for which rule got named. Collapsed
+    # here to one edge per (From, To) pair, preferring whichever
+    # candidate rule already carries a finding (and the most severe one,
+    # if several do), since that's the more informative rule to name in
+    # a path anyway.
+    $severityRank = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
+    $bestByPair = @{}
+    foreach ($e in $edges) {
+        $key = "$($e.From)|$($e.To)"
+        $existing = $bestByPair[$key]
+        if (-not $existing) { $bestByPair[$key] = $e; continue }
+        $eRank = if ($SeverityByRule.ContainsKey($e.RuleName)) { $severityRank[$SeverityByRule[$e.RuleName]] } else { 99 }
+        $exRank = if ($SeverityByRule.ContainsKey($existing.RuleName)) { $severityRank[$SeverityByRule[$existing.RuleName]] } else { 99 }
+        if ($eRank -lt $exRank) { $bestByPair[$key] = $e }
+    }
+
+    return @($bestByPair.Values)
+}
+
+function Find-ZonePaths {
+    # Enumerates simple paths (no repeated node) from any of $StartNodes
+    # to any of $TargetNodes, capped by hop count rather than by ruleset
+    # size - a bigger ruleset just means a bigger graph, not a reason to
+    # skip searching it. The depth cap exists for a different reason: past
+    # a handful of hops, a chain gets speculative enough (does an attacker
+    # really pivot through four separately-compromised hosts in sequence?)
+    # that it's more noise than signal for a hygiene report, not a
+    # performance concern.
+    param([array]$Edges, [array]$StartNodes, [array]$TargetNodes, [array]$InternetZoneSet = @(), [int]$MaxDepth = 4)
+
+    $edgesByFrom = @{}
+    foreach ($e in $Edges) {
+        if (-not $edgesByFrom.ContainsKey($e.From)) { $edgesByFrom[$e.From] = New-Object System.Collections.Generic.List[PSCustomObject] }
+        $edgesByFrom[$e.From].Add($e)
+    }
+
+    $foundPaths = New-Object System.Collections.Generic.List[PSCustomObject]
+    $stack = New-Object System.Collections.Generic.Stack[PSCustomObject]
+    foreach ($start in $StartNodes) {
+        $stack.Push([PSCustomObject]@{ Node = $start; Visited = @($start); UsedRules = @(); Steps = @() })
+    }
+
+    # Iterative, not recursive: PowerShell function-call overhead adds up
+    # fast on a deep, branchy search, and an explicit stack sidesteps that
+    # without changing the traversal order (still depth-first).
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        if (($TargetNodes -contains $current.Node) -and $current.Steps.Count -gt 0) {
+            $foundPaths.Add([PSCustomObject]@{ Steps = $current.Steps })
+        }
+        if ($current.Steps.Count -ge $MaxDepth) { continue }
+        # An internet-equivalent node reached partway through a path (not
+        # as the starting point) is a dead end for further traversal, not
+        # a pivot to continue from. "X reaches the internet, and the
+        # internet reaches Y" are two independent exposure facts, not one
+        # sequential attack chain - Y is already reachable directly from
+        # the internet on its own, a shorter and more accurate path than
+        # one that spuriously routes it through X first.
+        $currentIsInternet = ($current.Node -eq "(internet)") -or ($InternetZoneSet -contains $current.Node)
+        if ($currentIsInternet -and $current.Steps.Count -gt 0) { continue }
+        if (-not $edgesByFrom.ContainsKey($current.Node)) { continue }
+        foreach ($edge in $edgesByFrom[$current.Node]) {
+            if ($current.Visited -contains $edge.To) { continue }
+            # A single very broad rule (any/any-ish) can connect many
+            # zone pairs at once, but reusing that SAME rule for more
+            # than one hop in a path isn't a real multi-step chain
+            # (different compromised hosts pivoting through different
+            # controls) - it's one overly broad rule counted several
+            # times. Barring rule reuse keeps paths meaningful and also
+            # substantially narrows the branching factor on a ruleset
+            # with a handful of very broad rules.
+            if ($current.UsedRules -contains $edge.RuleName) { continue }
+            # The internet boundary shouldn't be crossed twice under two
+            # different names in the same path. "(internet)" the virtual
+            # node and a specifically-named internet zone (e.g. Untrust,
+            # or a real zone that happens to also be a configured
+            # internet zone name) represent the SAME real-world boundary;
+            # once the path has touched it once, in either form, touching
+            # it again later isn't a further, meaningful pivot - it's the
+            # same crossing re-labeled. Only exempted when that boundary
+            # is itself one of the search targets.
+            $edgeToIsInternet = ($edge.To -eq "(internet)") -or ($InternetZoneSet -contains $edge.To)
+            if ($edgeToIsInternet -and -not ($TargetNodes -contains $edge.To)) {
+                $alreadyTouchedInternet = ($current.Visited -contains "(internet)") -or (@($current.Visited | Where-Object { $InternetZoneSet -contains $_ })).Count -gt 0
+                if ($alreadyTouchedInternet) { continue }
+            }
+            $stack.Push([PSCustomObject]@{
+                Node      = $edge.To
+                Visited   = $current.Visited + @($edge.To)
+                UsedRules = $current.UsedRules + @($edge.RuleName)
+                Steps     = $current.Steps + @($edge)
+            })
+        }
+    }
+
+    return $foundPaths
+}
+
+function Get-ZonePathScore {
+    # Higher score = more concerning = higher priority to surface in a
+    # necessarily-short list. Reaching an actual critical zone matters
+    # most; each hop that involves a rule with an existing High/Critical
+    # finding adds real weight, since a chain built out of already-flagged
+    # rules is a more concrete, evidenced story than one where every hop
+    # looks clean in isolation. Shorter paths are weighted slightly
+    # higher too: a 2-hop path is a more direct, more readily exploitable
+    # route than a 4-hop one even when both technically connect.
+    param($Path, [array]$CriticalZoneSet, [hashtable]$WorstSeverityByRule)
+    $score = 0
+    $lastStep = $Path.Steps[-1]
+    if ($CriticalZoneSet -contains $lastStep.To) { $score += 100 }
+    foreach ($step in $Path.Steps) {
+        if ($WorstSeverityByRule.ContainsKey($step.RuleName)) {
+            switch ($WorstSeverityByRule[$step.RuleName]) {
+                "Critical" { $score += 40 }
+                "High" { $score += 25 }
+                "Medium" { $score += 10 }
+                "Low" { $score += 3 }
+            }
+        }
+    }
+    $score -= ($Path.Steps.Count * 2)
+    return $score
+}
+
+function Find-AttackPaths {
+    # Top-level entry point tying the three functions above together:
+    # build the graph, search from internet + any zone already carrying a
+    # High/Critical finding (lateral-movement chains that never touch the
+    # internet directly are just as real a story as ones that do) toward
+    # configured critical zones (or, if none are configured, simply
+    # explore what's reachable multiple hops deep from the internet, since
+    # "how far in can this go" is still meaningful without a named crown
+    # jewel), then rank and keep only the top handful. The cap here is on
+    # how many paths get SHOWN, not on how much of the ruleset gets
+    # searched - the search itself already covered everything.
+    param([array]$Rules, [array]$Findings, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$MaxPaths = 10)
+
+    $severityRank = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
+    $worstSeverityByRule = @{}
+    foreach ($f in $Findings) {
+        if (-not $worstSeverityByRule.ContainsKey($f.RuleName) -or $severityRank[$f.Severity] -lt $severityRank[$worstSeverityByRule[$f.RuleName]]) {
+            $worstSeverityByRule[$f.RuleName] = $f.Severity
+        }
+    }
+
+    $edges = Build-ZoneReachabilityGraph -Rules $Rules -InternetZoneSet $InternetZoneSet -SeverityByRule $worstSeverityByRule
+
+    $startNodes = New-Object System.Collections.Generic.HashSet[string]
+    [void]$startNodes.Add("(internet)")
+    foreach ($rule in $Rules) {
+        if ($worstSeverityByRule.ContainsKey($rule.Name) -and @("Critical", "High") -contains $worstSeverityByRule[$rule.Name]) {
+            foreach ($z in $rule.SrcZone) {
+                $zl = $z.Trim().ToLower()
+                if ($zl -ne "any") { [void]$startNodes.Add($zl) }
+            }
+        }
+    }
+
+    if ($CriticalZoneSet.Count -gt 0) {
+        $targetNodes = $CriticalZoneSet
+    }
+    else {
+        # No configured crown jewels: fall back to "anything reachable
+        # multiple hops in from the internet" by targeting every zone that
+        # isn't itself the internet - still surfaces deep lateral
+        # movement, just without a specific named destination to call out.
+        # Excludes both the virtual node and any specifically-named
+        # internet zone (e.g. Untrust, or a real zone that also happens to
+        # be a configured internet zone name): neither is a meaningful
+        # lateral-movement destination, they're the same boundary the path
+        # already started from.
+        $targetNodes = @($edges | ForEach-Object { $_.To } | Where-Object { $_ -ne "(internet)" -and $InternetZoneSet -notcontains $_ } | Select-Object -Unique)
+    }
+
+    $allPaths = Find-ZonePaths -Edges $edges -StartNodes @($startNodes) -TargetNodes $targetNodes -InternetZoneSet $InternetZoneSet -MaxDepth 4
+
+    # De-duplicated by the sequence of rule names actually traversed
+    # (not by node sequence), since the implicit "any" edges can
+    # otherwise produce multiple technically-distinct node paths that
+    # represent the exact same real chain of rules.
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $uniquePaths = New-Object System.Collections.Generic.List[PSCustomObject]
+    foreach ($p in $allPaths) {
+        $key = ($p.Steps | ForEach-Object { $_.RuleName }) -join "|"
+        if ($seen.Add($key)) { $uniquePaths.Add($p) }
+    }
+
+    $scored = $uniquePaths | ForEach-Object {
+        [PSCustomObject]@{ Path = $_; Score = Get-ZonePathScore -Path $_ -CriticalZoneSet $CriticalZoneSet -WorstSeverityByRule $worstSeverityByRule }
+    }
+    $top = $scored | Sort-Object -Property Score -Descending | Select-Object -First $MaxPaths
+    return @($top | ForEach-Object { $_.Path })
 }
