@@ -27,6 +27,50 @@ function Protect-IPAddresses {
 
 $SeverityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
 
+function Get-SvgAttackPathDiagram {
+    # A horizontal chain diagram for one attack path: one box per zone in
+    # sequence, connected by arrows labeled with the rule that permits
+    # that hop. Internet gets its own color (it's the likely starting
+    # point of a real attack); a critical-zone node gets the gold accent
+    # (it's the destination that matters). Width is computed from however
+    # many nodes this particular path has, since paths range from 2 to 5
+    # nodes depending on hop count.
+    param([array]$Steps, [array]$CriticalZoneSet)
+
+    $nodes = @($Steps[0].From) + @($Steps | ForEach-Object { $_.To })
+    $boxWidth = 130
+    $boxHeight = 38
+    $gap = 85
+    $totalWidth = ($nodes.Count * $boxWidth) + (($nodes.Count - 1) * $gap) + 20
+    $y = 34
+
+    $svg = "<svg viewBox='0 0 $totalWidth 94' width='$totalWidth' height='94' xmlns='http://www.w3.org/2000/svg'>"
+    $svg += "<defs><marker id='moose-arrowhead' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><polygon points='0 0, 8 4, 0 8' fill='#6B655C' /></marker></defs>"
+
+    for ($i = 0; $i -lt $nodes.Count; $i++) {
+        $x = 10 + $i * ($boxWidth + $gap)
+        $node = $nodes[$i]
+        $displayName = if ($node -eq "(internet)") { "Internet" } else { $node }
+        if ($displayName.Length -gt 16) { $displayName = $displayName.Substring(0, 14) + "..." }
+        $isCritical = $CriticalZoneSet -contains $node
+        $fillColor = if ($node -eq "(internet)") { "#B33A3A" } elseif ($isCritical) { "#A6720F" } else { "#2B2A28" }
+        $svg += "<rect x='$x' y='$y' width='$boxWidth' height='$boxHeight' rx='6' fill='$fillColor' />"
+        $svg += "<text x='$($x + $boxWidth / 2)' y='$($y + $boxHeight / 2 + 4)' text-anchor='middle' font-size='12' fill='#FDFCFA' font-weight='600'>$displayName</text>"
+
+        if ($i -lt $nodes.Count - 1) {
+            $arrowStartX = $x + $boxWidth
+            $arrowEndX = $arrowStartX + $gap - 6
+            $arrowY = $y + $boxHeight / 2
+            $svg += "<line x1='$arrowStartX' y1='$arrowY' x2='$arrowEndX' y2='$arrowY' stroke='#6B655C' stroke-width='2' marker-end='url(#moose-arrowhead)' />"
+            $ruleLabel = $Steps[$i].RuleName
+            if ($ruleLabel.Length -gt 18) { $ruleLabel = $ruleLabel.Substring(0, 16) + "..." }
+            $svg += "<text x='$($arrowStartX + $gap / 2)' y='$($y - 8)' text-anchor='middle' font-size='9' fill='#6B655C'>$ruleLabel</text>"
+        }
+    }
+    $svg += "</svg>"
+    return $svg
+}
+
 function Get-SvgPieChart {
     # Dependency-free donut chart: plain SVG, no charting library. Drawn
     # as concentric ring strokes with stroke-dasharray/-dashoffset (each
@@ -143,7 +187,7 @@ function Get-FindingsComparison {
 }
 
 function Get-ReportLines {
-    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM)
+    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM, [array]$AttackPaths = @())
 
     # Look up Source/Destination/Action/Profile by rule name at render time,
     # rather than attaching them to every finding at creation. This avoids
@@ -173,6 +217,11 @@ function Get-ReportLines {
     # Gemini step runs and this function gets called a second time to
     # rebuild the report with them included).
     $showSuggestedFix = @($Findings | Where-Object { $_.SuggestedFix }).Count -gt 0
+
+    # MITRE ATT&CK tags are AI-only (no deterministic equivalent), so this
+    # is simpler: absent entirely until the optional Gemini step runs and
+    # tags a subset of findings.
+    $showMitreTag = @($Findings | Where-Object { $_.MitreTag }).Count -gt 0
 
     # The any_any_any_allow finding itself is the broadest possible rule in
     # the ruleset. Pin just that row to the top, not every other finding
@@ -482,6 +531,7 @@ function Get-ReportLines {
             Modified = if ($ctx) { $ctx.Modified } else { "" }
             Type     = $f.Type; Detail = $f.Detail; Compare = $compareTag
             Suggested = if ($f.SuggestedFix) { $f.SuggestedFix } else { "" }
+            Mitre    = if ($f.MitreTag) { $f.MitreTag } else { "" }
         })
     }
     if ($comparison) {
@@ -493,6 +543,7 @@ function Get-ReportLines {
                 Created  = $f.Created; Modified = $f.Modified
                 Type     = $f.Type; Detail = $f.Detail; Compare = "Resolved"
                 Suggested = ""
+                Mitre    = ""
             })
         }
         # Stable sort: within the same severity, current-run rows (already
@@ -510,19 +561,22 @@ function Get-ReportLines {
     $lines += ""
     $extraHeader = if ($showCreatedModified) { " Created | Modified |" } else { "" }
     $suggestedHeader = if ($showSuggestedFix) { " Suggested Fix |" } else { "" }
+    $mitreHeader = if ($showMitreTag) { " MITRE ATT&CK |" } else { "" }
     $compareHeader = if ($comparison) { " Comparison |" } else { "" }
-    $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile |$extraHeader Type | Detail |$suggestedHeader$compareHeader"
+    $lines += "| Severity | Rule | Source | Destination | Application | Service | Action | Profile |$extraHeader Type | Detail |$suggestedHeader$mitreHeader$compareHeader"
     $sep = "|---|---|---|---|---|---|---|---|"
     if ($showCreatedModified) { $sep += "---|---|" }
     $sep += "---|---|"
     if ($showSuggestedFix) { $sep += "---|" }
+    if ($showMitreTag) { $sep += "---|" }
     if ($comparison) { $sep += "---|" }
     $lines += $sep
     foreach ($r in $renderRows) {
         $extraVals = if ($showCreatedModified) { " $($r.Created) | $($r.Modified) |" } else { "" }
         $suggestedVal = if ($showSuggestedFix) { " $($r.Suggested) |" } else { "" }
+        $mitreVal = if ($showMitreTag) { " $($r.Mitre) |" } else { "" }
         $compareVal = if ($comparison) { " $($r.Compare) |" } else { "" }
-        $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) |$extraVals $($r.Type) | $($r.Detail) |$suggestedVal$compareVal"
+        $lines += "| $($r.Severity) | $($r.Rule) | $($r.Src) | $($r.Dst) | $($r.App) | $($r.Svc) | $($r.Action) | $($r.Profile) |$extraVals $($r.Type) | $($r.Detail) |$suggestedVal$mitreVal$compareVal"
     }
 
     $sortedInventory = $Inventory
@@ -545,6 +599,35 @@ function Get-ReportLines {
         $lines += "| $($r.RuleName) | $($r.Direction) | $($r.Src) | $($r.Dst) | $($r.Application) | $($r.Service) | $($r.Action) | $($r.Profile) |$invExtraVals"
     }
 
+    if ($AttackPaths.Count -gt 0) {
+        $lines += ""
+        $lines += "## Attack Path Analysis"
+        $lines += ""
+        $lines += "Zone-to-zone reachability computed directly from the ruleset (a graph search, not an AI guess): each step below is an enabled allow rule that actually permits that hop. Longer, more speculative chains beyond a handful of hops aren't shown."
+        $lines += ""
+        $pathNum = 0
+        foreach ($p in $AttackPaths) {
+            $pathNum++
+            $nodes = @($p.Steps[0].From) + @($p.Steps | ForEach-Object { $_.To })
+            $displayNodes = $nodes | ForEach-Object { if ($_ -eq "(internet)") { "Internet" } else { $_ } }
+            $chainText = ($displayNodes -join " -> ")
+            $lines += "**Path ${pathNum}:** $chainText"
+            $lines += ""
+            $lines += "%%RAWHTML_BASE64%%$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((Get-SvgAttackPathDiagram -Steps $p.Steps -CriticalZoneSet $CriticalZoneSet))))"
+            $lines += ""
+            foreach ($step in $p.Steps) {
+                $stepFrom = if ($step.From -eq "(internet)") { "Internet" } else { $step.From }
+                $stepTo = if ($step.To -eq "(internet)") { "Internet" } else { $step.To }
+                $lines += "- $stepFrom -> $stepTo via rule ``$($step.RuleName)`` (application: $($step.Application))"
+            }
+            if ($p.Assessment) {
+                $lines += ""
+                $lines += "> **AI assessment:** $($p.Assessment)"
+            }
+            $lines += ""
+        }
+    }
+
     return $lines
 }
 
@@ -562,7 +645,9 @@ privacy. Refer to them by their placeholder token, never guess a real address.
 You may also be given a "Tags" section listing free-text tags for the flagged
 rules. Use these only as extra context (e.g. a tag mentioning "temporary" or
 a ticket number is worth surfacing), never as a basis for inventing new
-technical findings.
+technical findings. You may also be given an "Attack Paths" section: these
+are zone-to-zone reachability chains already computed by a deterministic
+graph search over the ruleset, not something you need to discover yourself.
 
 Your job:
 - Write a short executive-readable summary (3-5 sentences) of the overall
@@ -585,12 +670,33 @@ Your job:
   This is explicitly a guess for a human to verify, not a determination, and
   your reasoning field must say what specifically (which word in the name, tag,
   or port) led to the guess.
+- For findings that clearly correspond to a well-known MITRE ATT&CK technique
+  (a specific risky application/port, ICMP or DNS-tunneling patterns, and
+  similar concrete techniques, not vague hygiene findings like duplicates or
+  disabled rules), map it to that technique's ID and name. Only tag a finding
+  when you're confident of the mapping; skip it entirely rather than forcing
+  a speculative or overly generic tag (e.g. don't tag something as "T1071
+  Application Layer Protocol" just because it's network traffic - that's too
+  generic to be useful). Cite the specific tactic the technique falls under
+  (e.g. "Lateral Movement", "Exfiltration").
+- If an "Attack Paths" section is given, write one short (1-2 sentence)
+  plausibility/severity assessment per path, referencing the path_index
+  given for each one. Judge it on its own terms (does this chain represent a
+  real, concrete route an attacker could plausibly follow, given what's
+  actually exposed at each hop), not by re-deriving whether the chain itself
+  is technically correct - that part is already a computed fact, not
+  something to second-guess.
 
 Respond with a single JSON object only, no markdown fences, matching this schema:
 { "executive_summary": "...", "remediation_order": ["...", "...", "..."],
-  "application_suggestions": [ { "rule_name": "...", "type": "...", "suggested_application": "...", "reasoning": "..." } ] }
+  "application_suggestions": [ { "rule_name": "...", "type": "...", "suggested_application": "...", "reasoning": "..." } ],
+  "mitre_mappings": [ { "rule_name": "...", "type": "...", "technique_id": "...", "technique_name": "...", "tactic": "..." } ],
+  "attack_path_assessments": [ { "path_index": 0, "assessment": "..." } ] }
 The application_suggestions array may be empty if no finding of the eligible
-types was given, or if none had enough of a hint to guess from.
+types was given, or if none had enough of a hint to guess from. The
+mitre_mappings array may be empty if nothing given maps clearly to a known
+technique. The attack_path_assessments array may be empty if no Attack Paths
+section was given.
 "@
 
 function Invoke-HttpPostWithSpinner {
