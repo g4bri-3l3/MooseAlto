@@ -560,8 +560,18 @@ for ($bi = 0; $bi -lt $batches.Count; $bi++) {
             $nodes = @($p.Steps[0].From) + @($p.Steps | ForEach-Object { $_.To })
             $displayNodes = $nodes | ForEach-Object { if ($_ -eq "(internet)") { "Internet" } else { $_ } }
             $chainText = ($displayNodes -join " -> ")
-            $rulesInvolved = ($p.Steps | ForEach-Object { $_.RuleName }) -join ", "
-            $pathLines += "- path_index ${pi}: $chainText (rules: $rulesInvolved)"
+            # Each hop's zone match, application, and service, plus
+            # whether a zone was explicitly named in that rule or reached
+            # only through its zone="any" match (a real PAN-OS semantic:
+            # "any" matches every zone the firewall knows about, not just
+            # ones written in that rule's own row) - worth weighing when
+            # judging how concrete versus speculative a given hop is.
+            $stepDetails = ($p.Steps | ForEach-Object {
+                $fromNote = if ($_.SrcViaAny) { " [via any]" } else { "" }
+                $toNote = if ($_.DstViaAny) { " [via any]" } else { "" }
+                "$($_.From)$fromNote->$($_.To)$toNote via ``$($_.RuleName)`` (app: $($_.Application), service: $($_.Service))"
+            }) -join "; "
+            $pathLines += "- path_index ${pi}: $chainText - $stepDetails"
         }
         $maskedLines += $pathLines
     }
