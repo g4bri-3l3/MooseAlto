@@ -1307,15 +1307,36 @@ function Build-ZoneReachabilityGraph {
         $srcIsInet = Test-SideIsInternet -Zones $rule.SrcZone -AddrTokens $rule.SrcAddr -InternetZoneSet $InternetZoneSet
         $dstIsInet = Test-SideIsInternet -Zones $rule.DstZone -AddrTokens $rule.DstAddr -InternetZoneSet $InternetZoneSet
 
+        # Expanding "any" into every real zone is only accurate for a
+        # zone that's ALSO a configured internet zone (e.g. Untrust) when
+        # this side is genuinely internet-reachable. If the address on
+        # this same side is exclusively private (the same override
+        # already applied to the "(internet)" virtual node above), a
+        # rule that only ever matches private-sourced traffic has
+        # nothing to do with the real Untrust interface just because
+        # zone="any" technically also matches packets arriving there -
+        # attributing it to that specific zone name would be exactly as
+        # misleading as attributing it to "(internet)" itself, which is
+        # already excluded in that case.
         $srcNodes = New-Object System.Collections.Generic.List[string]
         $srcHasAny = @($rule.SrcZone | ForEach-Object { $_.Trim().ToLower() }) -contains "any"
-        if ($srcHasAny) { foreach ($z in $realZones) { $srcNodes.Add($z) } }
+        if ($srcHasAny) {
+            foreach ($z in $realZones) {
+                if (-not $srcIsInet -and $InternetZoneSet -contains $z) { continue }
+                $srcNodes.Add($z)
+            }
+        }
         else { foreach ($z in $rule.SrcZone) { $srcNodes.Add($z.Trim().ToLower()) } }
         if ($srcIsInet) { $srcNodes.Add("(internet)") }
 
         $dstNodes = New-Object System.Collections.Generic.List[string]
         $dstHasAny = @($rule.DstZone | ForEach-Object { $_.Trim().ToLower() }) -contains "any"
-        if ($dstHasAny) { foreach ($z in $realZones) { $dstNodes.Add($z) } }
+        if ($dstHasAny) {
+            foreach ($z in $realZones) {
+                if (-not $dstIsInet -and $InternetZoneSet -contains $z) { continue }
+                $dstNodes.Add($z)
+            }
+        }
         else { foreach ($z in $rule.DstZone) { $dstNodes.Add($z.Trim().ToLower()) } }
         if ($dstIsInet) { $dstNodes.Add("(internet)") }
 
@@ -1529,3 +1550,5 @@ function Find-AttackPaths {
     $top = $scored | Sort-Object -Property Score -Descending | Select-Object -First $MaxPaths
     return @($top | ForEach-Object { $_.Path })
 }
+
+
