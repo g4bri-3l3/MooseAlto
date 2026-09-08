@@ -1447,10 +1447,17 @@ function Find-ZonePaths {
             # internet zone name) represent the SAME real-world boundary;
             # once the path has touched it once, in either form, touching
             # it again later isn't a further, meaningful pivot - it's the
-            # same crossing re-labeled. Only exempted when that boundary
-            # is itself one of the search targets.
+            # same crossing re-labeled. No target exemption here: reaching
+            # an internet-equivalent target for the FIRST time already
+            # works fine on its own (alreadyTouchedInternet is false at
+            # that point regardless of whether it's a target), and an
+            # exemption based on the destination being a configured
+            # target actively breaks the one case that matters most - two
+            # different internet zones (e.g. a second one added to
+            # -InternetZones) directly reaching each other, which is
+            # exactly the crossing this check exists to catch.
             $edgeToIsInternet = ($edge.To -eq "(internet)") -or ($InternetZoneSet -contains $edge.To)
-            if ($edgeToIsInternet -and -not ($TargetNodes -contains $edge.To)) {
+            if ($edgeToIsInternet) {
                 $alreadyTouchedInternet = ($current.Visited -contains "(internet)") -or (@($current.Visited | Where-Object { $InternetZoneSet -contains $_ })).Count -gt 0
                 if ($alreadyTouchedInternet) { continue }
             }
