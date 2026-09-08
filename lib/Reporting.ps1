@@ -618,7 +618,9 @@ function Get-ReportLines {
             foreach ($step in $p.Steps) {
                 $stepFrom = if ($step.From -eq "(internet)") { "Internet" } else { $step.From }
                 $stepTo = if ($step.To -eq "(internet)") { "Internet" } else { $step.To }
-                $lines += "- $stepFrom -> $stepTo via rule ``$($step.RuleName)`` (application: $($step.Application))"
+                $fromNote = if ($step.SrcViaAny) { " (via any, not explicitly named in this rule)" } else { "" }
+                $toNote = if ($step.DstViaAny) { " (via any, not explicitly named in this rule)" } else { "" }
+                $lines += "- ${stepFrom}${fromNote} -> ${stepTo}${toNote} via rule ``$($step.RuleName)`` (application: $($step.Application), service: $($step.Service))"
             }
             if ($p.Assessment) {
                 $lines += ""
@@ -685,7 +687,11 @@ Your job:
   real, concrete route an attacker could plausibly follow, given what's
   actually exposed at each hop), not by re-deriving whether the chain itself
   is technically correct - that part is already a computed fact, not
-  something to second-guess.
+  something to second-guess. A hop marked "[via any]" means that zone was
+  reached only through the rule's zone="any" match, not because the rule
+  names that zone specifically - still a real, valid match (that's what
+  "any" means in PAN-OS), but worth treating as somewhat more speculative
+  in your assessment than a hop where the zone is explicitly named.
 
 Respond with a single JSON object only, no markdown fences, matching this schema:
 { "executive_summary": "...", "remediation_order": ["...", "...", "..."],

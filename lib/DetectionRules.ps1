@@ -1346,6 +1346,18 @@ function Build-ZoneReachabilityGraph {
                 $edges.Add([PSCustomObject]@{
                     From        = $s; To = $d; RuleName = $rule.Name
                     Application = if ($rule.Application) { $rule.Application -join "," } else { "any" }
+                    Service     = if ($rule.Service) { $rule.Service -join "," } else { "any" }
+                    # Whether THIS specific node came from the rule's zone
+                    # field literally naming it, or from expanding "any"
+                    # into every real zone the ruleset has. A rule with
+                    # zone="any" genuinely matches every zone the firewall
+                    # knows about, including ones never written in that
+                    # rule's own row - a real PAN-OS semantic, not a
+                    # display bug, but one that reads as "where did this
+                    # zone come from?" without the distinction being
+                    # visible in the report text.
+                    SrcViaAny   = $srcHasAny -and ($s -ne "(internet)")
+                    DstViaAny   = $dstHasAny -and ($d -ne "(internet)")
                 })
             }
         }
