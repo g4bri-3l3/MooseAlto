@@ -27,49 +27,6 @@ function Protect-IPAddresses {
 
 $SeverityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
 
-function Get-SvgAttackPathDiagram {
-    # A horizontal chain diagram for one attack path: one box per zone in
-    # sequence, connected by arrows labeled with the rule that permits
-    # that hop. Internet gets its own color (it's the likely starting
-    # point of a real attack); a critical-zone node gets the gold accent
-    # (it's the destination that matters). Width is computed from however
-    # many nodes this particular path has, since paths range from 2 to 5
-    # nodes depending on hop count.
-    param([array]$Steps, [array]$CriticalZoneSet)
-
-    $nodes = @($Steps[0].From) + @($Steps | ForEach-Object { $_.To })
-    $boxWidth = 130
-    $boxHeight = 38
-    $gap = 85
-    $totalWidth = ($nodes.Count * $boxWidth) + (($nodes.Count - 1) * $gap) + 20
-    $y = 34
-
-    $svg = "<svg viewBox='0 0 $totalWidth 94' width='$totalWidth' height='94' xmlns='http://www.w3.org/2000/svg'>"
-    $svg += "<defs><marker id='moose-arrowhead' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><polygon points='0 0, 8 4, 0 8' fill='#6B655C' /></marker></defs>"
-
-    for ($i = 0; $i -lt $nodes.Count; $i++) {
-        $x = 10 + $i * ($boxWidth + $gap)
-        $node = $nodes[$i]
-        $displayName = if ($node -eq "(internet)") { "Internet" } else { $node }
-        if ($displayName.Length -gt 16) { $displayName = $displayName.Substring(0, 14) + "..." }
-        $isCritical = $CriticalZoneSet -contains $node
-        $fillColor = if ($node -eq "(internet)") { "#B33A3A" } elseif ($isCritical) { "#A6720F" } else { "#2B2A28" }
-        $svg += "<rect x='$x' y='$y' width='$boxWidth' height='$boxHeight' rx='6' fill='$fillColor' />"
-        $svg += "<text x='$($x + $boxWidth / 2)' y='$($y + $boxHeight / 2 + 4)' text-anchor='middle' font-size='12' fill='#FDFCFA' font-weight='600'>$displayName</text>"
-
-        if ($i -lt $nodes.Count - 1) {
-            $arrowStartX = $x + $boxWidth
-            $arrowEndX = $arrowStartX + $gap - 6
-            $arrowY = $y + $boxHeight / 2
-            $svg += "<line x1='$arrowStartX' y1='$arrowY' x2='$arrowEndX' y2='$arrowY' stroke='#6B655C' stroke-width='2' marker-end='url(#moose-arrowhead)' />"
-            $ruleLabel = $Steps[$i].RuleName
-            if ($ruleLabel.Length -gt 18) { $ruleLabel = $ruleLabel.Substring(0, 16) + "..." }
-            $svg += "<text x='$($arrowStartX + $gap / 2)' y='$($y - 8)' text-anchor='middle' font-size='9' fill='#6B655C'>$ruleLabel</text>"
-        }
-    }
-    $svg += "</svg>"
-    return $svg
-}
 
 function Get-SvgPieChart {
     # Dependency-free donut chart: plain SVG, no charting library. Drawn
@@ -187,7 +144,7 @@ function Get-FindingsComparison {
 }
 
 function Get-ReportLines {
-    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM, [array]$AttackPaths = @())
+    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM)
 
     # Look up Source/Destination/Action/Profile by rule name at render time,
     # rather than attaching them to every finding at creation. This avoids
@@ -292,13 +249,20 @@ function Get-ReportLines {
 
     $inboundCount = 0; $outboundCount = 0; $bothCount = 0; $internalCount = 0
     foreach ($r in $allowRules) {
-        $srcInet = (Test-ZoneTouchesInternet -Zones $r.SrcZone -InternetZoneSet $InternetZoneSet) -or (Test-AddressTouchesInternet -AddrTokens $r.SrcAddr)
-        $dstInet = (Test-ZoneTouchesInternet -Zones $r.DstZone -InternetZoneSet $InternetZoneSet) -or (Test-AddressTouchesInternet -AddrTokens $r.DstAddr)
+        $srcInet = Test-SideIsInternet -Zones $r.SrcZone -AddrTokens $r.SrcAddr -InternetZoneSet $InternetZoneSet
+        $dstInet = Test-SideIsInternet -Zones $r.DstZone -AddrTokens $r.DstAddr -InternetZoneSet $InternetZoneSet
         if ($srcInet -and $dstInet) { $bothCount++ }
         elseif ($srcInet) { $inboundCount++ }
         elseif ($dstInet) { $outboundCount++ }
         else { $internalCount++ }
     }
+    # Same classification, collapsed to a simpler yes/no split: how much
+    # of the ruleset touches the internet in any direction versus staying
+    # fully internal. The four-way Direction chart already has this
+    # information, but answering "how much of this ruleset is even
+    # internet-relevant" from it means mentally adding three of its four
+    # slices together - worth a card of its own instead.
+    $internetTouchingCount = $inboundCount + $outboundCount + $bothCount
 
     $appFrequency = @{}
     foreach ($r in $allowRules) {
@@ -402,6 +366,7 @@ function Get-ReportLines {
     $severityPie = Get-SvgPieChart -Labels @("Critical", "High", "Medium", "Low") -Values @($critCount, $highCount, $medCount, $lowCount) -Colors @("#B33A3A", "#C1793A", "#D4A017", "#ADA79C") -CenterLabel "findings"
     $directionPie = Get-SvgPieChart -Labels @("Inbound", "Outbound", "Both sides", "Internal only") -Values @($inboundCount, $outboundCount, $bothCount, $internalCount) -Colors @("#A6720F", "#6B8F5E", "#8A6BAE", "#ADA79C") -CenterLabel "allow rules"
     $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#A6720F", "#C1793A", "#B33A3A") -CenterLabel "allow rules"
+    $trafficScopePie = Get-SvgPieChart -Labels @("Touches internet", "Internal only") -Values @($internetTouchingCount, $internalCount) -Colors @("#B33A3A", "#6B8F5E") -CenterLabel "allow rules"
 
     # Small hand-drawn inline icons (shield / exchange / lock), not an
     # icon font: MooseAlto's whole pitch is "no network calls unless you
@@ -410,15 +375,17 @@ function Get-ReportLines {
     $iconShield = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><path d='M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z'/></svg>"
     $iconExchange = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><path d='M7 3l4 4-4 4M3 7h8M17 21l-4-4 4-4M21 17h-8'/></svg>"
     $iconLock = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><rect x='4' y='11' width='16' height='9' rx='1'/><path d='M8 11V7a4 4 0 018 0v4'/></svg>"
+    $iconGlobe = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3c2.5 2.7 4 6 4 9s-1.5 6.3-4 9c-2.5-2.7-4-6-4-9s1.5-6.3 4-9z'/></svg>"
 
-    # All three pies together in one row rather than splitting the
-    # App-ID/port one off into its own row further down: three distribution
-    # charts belong next to each other, and a lone chart in its own
-    # full-width row was wasting most of that row's horizontal space.
+    # All four pies together in one row rather than splitting any off into
+    # their own row further down: distribution charts belong next to each
+    # other, and a lone chart in its own full-width row was wasting most
+    # of that row's horizontal space.
     $chartsHtml = "<div class='chart-row'>"
     $chartsHtml += "<div><div class='pie-chart-title'>${iconShield}Findings by severity</div>$severityPie</div>"
     $chartsHtml += "<div><div class='pie-chart-title'>${iconExchange}Allow rules by direction</div>$directionPie</div>"
     $chartsHtml += "<div><div class='pie-chart-title'>${iconLock}Allow rules: App-ID vs port-based matching</div>$appIdPie</div>"
+    $chartsHtml += "<div><div class='pie-chart-title'>${iconGlobe}Allow rules: internal vs internet-touching</div>$trafficScopePie</div>"
     $chartsHtml += "</div>"
 
     # Each of these is its own self-contained block, built independently
@@ -599,37 +566,6 @@ function Get-ReportLines {
         $lines += "| $($r.RuleName) | $($r.Direction) | $($r.Src) | $($r.Dst) | $($r.Application) | $($r.Service) | $($r.Action) | $($r.Profile) |$invExtraVals"
     }
 
-    if ($AttackPaths.Count -gt 0) {
-        $lines += ""
-        $lines += "## Attack Path Analysis"
-        $lines += ""
-        $lines += "Zone-to-zone reachability computed directly from the ruleset (a graph search, not an AI guess): each step below is an enabled allow rule that actually permits that hop. Longer, more speculative chains beyond a handful of hops aren't shown."
-        $lines += ""
-        $pathNum = 0
-        foreach ($p in $AttackPaths) {
-            $pathNum++
-            $nodes = @($p.Steps[0].From) + @($p.Steps | ForEach-Object { $_.To })
-            $displayNodes = $nodes | ForEach-Object { if ($_ -eq "(internet)") { "Internet" } else { $_ } }
-            $chainText = ($displayNodes -join " -> ")
-            $lines += "**Path ${pathNum}:** $chainText"
-            $lines += ""
-            $lines += "%%RAWHTML_BASE64%%$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((Get-SvgAttackPathDiagram -Steps $p.Steps -CriticalZoneSet $CriticalZoneSet))))"
-            $lines += ""
-            foreach ($step in $p.Steps) {
-                $stepFrom = if ($step.From -eq "(internet)") { "Internet" } else { $step.From }
-                $stepTo = if ($step.To -eq "(internet)") { "Internet" } else { $step.To }
-                $fromNote = if ($step.SrcViaAny) { " (via any, not explicitly named in this rule)" } else { "" }
-                $toNote = if ($step.DstViaAny) { " (via any, not explicitly named in this rule)" } else { "" }
-                $lines += "- ${stepFrom}${fromNote} -> ${stepTo}${toNote} via rule ``$($step.RuleName)`` (application: $($step.Application), service: $($step.Service))"
-            }
-            if ($p.Assessment) {
-                $lines += ""
-                $lines += "> **AI assessment:** $($p.Assessment)"
-            }
-            $lines += ""
-        }
-    }
-
     return $lines
 }
 
@@ -647,9 +583,7 @@ privacy. Refer to them by their placeholder token, never guess a real address.
 You may also be given a "Tags" section listing free-text tags for the flagged
 rules. Use these only as extra context (e.g. a tag mentioning "temporary" or
 a ticket number is worth surfacing), never as a basis for inventing new
-technical findings. You may also be given an "Attack Paths" section: these
-are zone-to-zone reachability chains already computed by a deterministic
-graph search over the ruleset, not something you need to discover yourself.
+technical findings.
 
 Your job:
 - Write a short executive-readable summary (3-5 sentences) of the overall
@@ -681,28 +615,15 @@ Your job:
   Application Layer Protocol" just because it's network traffic - that's too
   generic to be useful). Cite the specific tactic the technique falls under
   (e.g. "Lateral Movement", "Exfiltration").
-- If an "Attack Paths" section is given, write one short (1-2 sentence)
-  plausibility/severity assessment per path, referencing the path_index
-  given for each one. Judge it on its own terms (does this chain represent a
-  real, concrete route an attacker could plausibly follow, given what's
-  actually exposed at each hop), not by re-deriving whether the chain itself
-  is technically correct - that part is already a computed fact, not
-  something to second-guess. A hop marked "[via any]" means that zone was
-  reached only through the rule's zone="any" match, not because the rule
-  names that zone specifically - still a real, valid match (that's what
-  "any" means in PAN-OS), but worth treating as somewhat more speculative
-  in your assessment than a hop where the zone is explicitly named.
 
 Respond with a single JSON object only, no markdown fences, matching this schema:
 { "executive_summary": "...", "remediation_order": ["...", "...", "..."],
   "application_suggestions": [ { "rule_name": "...", "type": "...", "suggested_application": "...", "reasoning": "..." } ],
-  "mitre_mappings": [ { "rule_name": "...", "type": "...", "technique_id": "...", "technique_name": "...", "tactic": "..." } ],
-  "attack_path_assessments": [ { "path_index": 0, "assessment": "..." } ] }
+  "mitre_mappings": [ { "rule_name": "...", "type": "...", "technique_id": "...", "technique_name": "...", "tactic": "..." } ] }
 The application_suggestions array may be empty if no finding of the eligible
 types was given, or if none had enough of a hint to guess from. The
 mitre_mappings array may be empty if nothing given maps clearly to a known
-technique. The attack_path_assessments array may be empty if no Attack Paths
-section was given.
+technique.
 "@
 
 function Invoke-HttpPostWithSpinner {
@@ -886,6 +807,7 @@ function ConvertTo-ReportHtml {
   .stat-card .stat-value { font-size: 24px; font-weight: bold; color: var(--slate); }
   .stat-card .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .chart-row { display: flex; flex-wrap: wrap; gap: 36px; margin: 12px 0 24px 0; }
+  .chart-row > div { flex: 1 1 280px; min-width: 280px; }
   .pie-chart-wrap { display: flex; align-items: center; gap: 16px; }
   .pie-chart-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--slate); }
   .pie-legend { font-size: 12px; }
