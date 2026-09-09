@@ -351,6 +351,17 @@ Copy the key and set it as the `GEMINI_API_KEY` environment variable
 before running MooseAlto (or pass it directly with `-ApiKey`; see Usage
 below).
 
+**Setting it once instead of every session:** `$env:GEMINI_API_KEY = "..."`
+only lasts for the current PowerShell window. To make it permanent, run
+this once:
+
+```powershell
+[Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your-key-here", "User")
+```
+
+Close and reopen PowerShell afterward (a variable set this way only takes
+effect in new sessions, not the one that set it).
+
 The deterministic report is generated and saved **first**, with real IP
 addresses intact (local file only, **nothing leaves your machine at this
 point**). Only afterward does the script ask, interactively, whether to send
@@ -373,8 +384,23 @@ choice. A disabled rule isn't an active risk, so there's nothing to
 usefully prioritize about it. It still appears in the local deterministic
 report.
 
-If there are zero findings, or the chosen scope filters everything out,
-the script skips the Gemini call entirely.
+**MITRE ATT&CK tagging:** findings that clearly correspond to a
+well-known technique get tagged with its ID, name, and tactic in a new
+column, shown only when at least one finding has been tagged. The model
+is instructed to skip a finding rather than force a speculative or
+overly generic tag.
+
+**Large rulesets and rate limits:** a ruleset large enough to produce a
+few thousand findings can exceed the Gemini free tier's per-minute
+input-token quota. MooseAlto splits the
+request into multiple smaller batches automatically when this is likely,
+sent more than 60 seconds apart (the quota is cumulative per minute, not
+per request, so anything shorter risks tripping the same limit this
+batching exists to avoid), and merges the results; a console note
+explains when this kicks in. This takes longer than a single call would,
+and the remediation order is well-ordered within each batch but simply
+concatenated across batches, not globally re-prioritized against each
+other.
 
 ## Input format
 
@@ -572,6 +598,12 @@ on any prompt to accept the default shown in `[brackets]`. Once a CSV path
 is known (via prompt or parameter), everything proceeds exactly the same
 way. The optional Gemini call shows a live spinner while waiting on the
 network request.
+
+Once the guided question sequence completes, a review-and-edit loop
+lists every parameter with its current value; typing a number or a
+parameter name (either one, case-insensitive) changes just that one
+setting and returns to the list, instead of restarting the whole wizard
+to fix one answer. Press Enter with no changes to proceed.
 
 If `-OutHtml`/`-OutCsv` aren't specified, both default filenames include a
 shared timestamp (`report_yyyyMMdd_HHmmss.html` / `.csv`). A second
