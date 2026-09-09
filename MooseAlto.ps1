@@ -119,7 +119,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "1.8"
+$script:MooseAltoVersion = "1.9"
 
 function Show-Banner {
     $lines = @(
@@ -369,12 +369,6 @@ if ($addressObjects.Count -gt 0 -or $addressGroups.Count -gt 0) {
 $findings = Invoke-DeterministicChecks -Rules $rules -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize
 $inventory = Build-InternetExposureInventory -Rules $rules -InternetZoneSet $InternetZoneSet
 
-# Attack-path analysis: pure graph search over the ruleset, no AI
-# involved in finding the paths themselves (only, optionally, in
-# narrating them afterward - see the Gemini section below). Scales with
-# ruleset size the same way the rest of detection does, no separate cap.
-$attackPaths = Find-AttackPaths -Rules $rules -Findings $findings -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet
-
 Export-FindingsCsv -Findings $findings -Rules $rules -CsvPath $OutCsv
 if ($OutCsv -match '\.csv$') {
     $inventoryCsvPath = $OutCsv -replace '\.csv$', '_inventory.csv'
@@ -393,7 +387,7 @@ Export-InventoryCsv -Inventory $inventory -CsvPath $inventoryCsvPath
 $processingElapsed = (Get-Date) - $processingStartTime
 $elapsedText = if ($processingElapsed.TotalMinutes -ge 1) { "{0}m {1}s" -f [int]$processingElapsed.TotalMinutes, $processingElapsed.Seconds } else { "{0:N1}s" -f $processingElapsed.TotalSeconds }
 
-$reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM -AttackPaths $attackPaths
+$reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
 Save-HtmlReport -MarkdownLines $reportLines -HtmlPath $OutHtml
 
 Write-Host "Report written to $OutHtml" -ForegroundColor Green
@@ -477,19 +471,6 @@ $includeTags = $false
 $tagsAnswer = Read-Host "Also include rule Tags in the prompt sent to Gemini? They may contain sensitive information (Y/N)"
 if ($tagsAnswer -match '^[Yy]') { $includeTags = $true }
 
-# 4c) Attack paths are already computed locally either way (see the report
-# regardless of this answer) - this only controls whether that zone-to-zone
-# topology (zone names, which rules connect them) also gets sent to Gemini
-# for a plausibility/severity write-up. It's a different kind of exposure
-# than an individual finding: it's a synthesis of network shape, not one
-# isolated fact, so it gets its own opt-in rather than riding along with
-# the findings by default.
-$includeAttackPaths = $false
-if ($attackPaths.Count -gt 0) {
-    $pathsAnswer = Read-Host "$($attackPaths.Count) attack path(s) were found locally (always shown in the report). Also send them to Gemini for an AI plausibility/severity write-up? (Y/N)"
-    if ($pathsAnswer -match '^[Yy]') { $includeAttackPaths = $true }
-}
-
 # 5) A large ruleset can produce enough findings to exceed Gemini's
 # free-tier per-minute input-token quota in a single request (seen in
 # practice around ~4,000 rules). Rather than fail outright, split into
@@ -526,7 +507,6 @@ $mergedResult = [PSCustomObject]@{
     remediation_order        = @()
     application_suggestions  = @()
     mitre_mappings           = @()
-    attack_path_assessments  = @()
 }
 $executiveSummaries = @()
 
@@ -550,32 +530,6 @@ for ($bi = 0; $bi -lt $batches.Count; $bi++) {
         if ($tagsLines.Count -gt 1) { $maskedLines += $tagsLines }
     }
 
-    # Sent once, with the first batch only - attack paths are independent
-    # of any single findings batch, so repeating them in every batch would
-    # just waste tokens re-sending the same data.
-    if ($bi -eq 0 -and $includeAttackPaths) {
-        $pathLines = @("", "Attack Paths (already computed via graph search, zone-to-zone reachability - not something to recompute or second-guess):")
-        for ($pi = 0; $pi -lt $attackPaths.Count; $pi++) {
-            $p = $attackPaths[$pi]
-            $nodes = @($p.Steps[0].From) + @($p.Steps | ForEach-Object { $_.To })
-            $displayNodes = $nodes | ForEach-Object { if ($_ -eq "(internet)") { "Internet" } else { $_ } }
-            $chainText = ($displayNodes -join " -> ")
-            # Each hop's zone match, application, and service, plus
-            # whether a zone was explicitly named in that rule or reached
-            # only through its zone="any" match (a real PAN-OS semantic:
-            # "any" matches every zone the firewall knows about, not just
-            # ones written in that rule's own row) - worth weighing when
-            # judging how concrete versus speculative a given hop is.
-            $stepDetails = ($p.Steps | ForEach-Object {
-                $fromNote = if ($_.SrcViaAny) { " [via any]" } else { "" }
-                $toNote = if ($_.DstViaAny) { " [via any]" } else { "" }
-                "$($_.From)$fromNote->$($_.To)$toNote via ``$($_.RuleName)`` (app: $($_.Application), service: $($_.Service))"
-            }) -join "; "
-            $pathLines += "- path_index ${pi}: $chainText - $stepDetails"
-        }
-        $maskedLines += $pathLines
-    }
-
     $userPrompt = $maskedLines -join "`n"
     $batchLabel = if ($batches.Count -gt 1) { " (batch $($bi + 1)/$($batches.Count))" } else { "" }
     Write-Host "Sending $($batch.Count) finding(s)$batchLabel ($(if ($sendOnlyInternet) { 'internet-only' } else { 'all' })), $($ipMap.Count) masked IP address(es) total to Gemini$(if ($includeTags) { ' (Tags included)' } else { ' (Tags excluded)' })..."
@@ -591,7 +545,6 @@ for ($bi = 0; $bi -lt $batches.Count; $bi++) {
     if ($batchResult.remediation_order) { $mergedResult.remediation_order = @($mergedResult.remediation_order) + @($batchResult.remediation_order) }
     if ($batchResult.application_suggestions) { $mergedResult.application_suggestions = @($mergedResult.application_suggestions) + @($batchResult.application_suggestions) }
     if ($batchResult.mitre_mappings) { $mergedResult.mitre_mappings = @($mergedResult.mitre_mappings) + @($batchResult.mitre_mappings) }
-    if ($batchResult.attack_path_assessments) { $mergedResult.attack_path_assessments = @($mergedResult.attack_path_assessments) + @($batchResult.attack_path_assessments) }
 
     # A short pause between batches, not just retry-on-failure within one:
     # free-tier quotas are also rate-limited per minute, and firing several
@@ -666,23 +619,11 @@ if ($llmResult) {
         }
     }
 
-    # Attack-path assessments, matched by the same path_index given in the
-    # prompt - the $attackPaths array's order is exactly what was sent, so
-    # the index maps back directly to the same array position.
-    if ($llmResult.attack_path_assessments) {
-        foreach ($assessment in $llmResult.attack_path_assessments) {
-            $idx = [int]$assessment.path_index
-            if ($idx -ge 0 -and $idx -lt $attackPaths.Count) {
-                $attackPaths[$idx] | Add-Member -NotePropertyName Assessment -NotePropertyValue $assessment.assessment -Force
-            }
-        }
-    }
-
     # The Findings table was already rendered to text once above; there's
     # no cheaper way to get the Suggested Fix column populated (both the
     # deterministic entries just applied and any AI ones) than re-running
     # the same render call now that findings carry updated values.
-    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM -AttackPaths $attackPaths
+    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
 
     $aiLines = @("", "## AI-Assisted Summary (Gemini, IP addresses masked before sending)", "")
     $aiLines += $llmResult.executive_summary
