@@ -79,12 +79,27 @@
     resolved, or still present since that run. Matched by (rule name,
     finding type), so renaming a rule between runs will show up as a
     resolved finding under the old name and a new one under the new name.
+.PARAMETER RiskyTaxonomyPath
+    Path to a JSON file extending the built-in risky-port/application
+    tables with environment-specific entries, without editing the script.
+    A custom entry sharing a key with a built-in one overrides just that
+    entry's label; everything else built-in stays. Expected shape:
+    { "riskyPorts": {"31337": "Custom-Backdoor"}, "cleartextPorts": [31337],
+      "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"} }
+    All three top-level keys are optional.
+.PARAMETER OutJson
+    Optional path for a structured JSON export of the findings, meant for
+    a SIEM, ticketing pipeline, or other automated consumer rather than a
+    person. Not produced unless this is set. Written once after the
+    deterministic report, and again (overwriting) after the optional
+    Gemini step if that ran, so it reflects the enriched findings
+    (Suggested Fix, MITRE tags) when available.
 .PARAMETER SkipLLM
     Never prompt for or send data to Gemini. Deterministic report only.
 .PARAMETER ApiKey
     Gemini API key. Defaults to $env:GEMINI_API_KEY.
 .PARAMETER Model
-    Gemini model name. Defaults to gemini-3.5-flash.
+    Gemini model name. Defaults to gemini-3.7-flash.
 
 .EXAMPLE
     .\MooseAlto.ps1 -InputCsv export.csv -OutHtml report.html -OutCsv report.csv
@@ -102,9 +117,11 @@ Param(
     [int]$StaleHitDays = 365,
     [int]$MaxAddressListSize = 25,
     [string]$CompareTo = "",
+    [string]$RiskyTaxonomyPath = "",
+    [string]$OutJson = "",
     [switch]$SkipLLM,
     [string]$ApiKey = $env:GEMINI_API_KEY,
-    [string]$Model = "gemini-3.5-flash"
+    [string]$Model = "gemini-3.7-flash"
 )
 
 # Both default filenames share one timestamp, computed once, so a given run
@@ -119,7 +136,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "1.9"
+$script:MooseAltoVersion = "2.0"
 
 function Show-Banner {
     $lines = @(
@@ -317,6 +334,8 @@ $CriticalZoneSet = @($CriticalZones -split "," | ForEach-Object { $_.Trim().ToLo
 . (Join-Path $PSScriptRoot "lib\DetectionRules.ps1")
 . (Join-Path $PSScriptRoot "lib\Reporting.ps1")
 
+if ($RiskyTaxonomyPath) { Merge-CustomRiskyTaxonomy -Path $RiskyTaxonomyPath }
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -369,7 +388,20 @@ if ($addressObjects.Count -gt 0 -or $addressGroups.Count -gt 0) {
 $findings = Invoke-DeterministicChecks -Rules $rules -InternetZoneSet $InternetZoneSet -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize
 $inventory = Build-InternetExposureInventory -Rules $rules -InternetZoneSet $InternetZoneSet
 
+# Computed once here (not just inside Get-ReportLines, which does its own
+# equivalent computation for the report table itself) so the optional
+# Gemini trend narrative below has the same New/Resolved/Persistent split
+# available without re-reading the previous CSV a second time.
+$comparison = $null
+if ($CompareTo) {
+    $previousFindings = Import-PreviousFindings -Path $CompareTo
+    if ($previousFindings) {
+        $comparison = Get-FindingsComparison -CurrentFindings $findings -PreviousFindings $previousFindings
+    }
+}
+
 Export-FindingsCsv -Findings $findings -Rules $rules -CsvPath $OutCsv
+if ($OutJson) { Export-FindingsJson -Findings $findings -Rules $rules -JsonPath $OutJson -InputCsvPath $InputCsv -ToolVersion $script:MooseAltoVersion }
 if ($OutCsv -match '\.csv$') {
     $inventoryCsvPath = $OutCsv -replace '\.csv$', '_inventory.csv'
 }
@@ -471,6 +503,19 @@ $includeTags = $false
 $tagsAnswer = Read-Host "Also include rule Tags in the prompt sent to Gemini? They may contain sensitive information (Y/N)"
 if ($tagsAnswer -match '^[Yy]') { $includeTags = $true }
 
+# 4c) A trend narrative only makes sense when there's something to compare
+# against, and only adds real value when something actually changed - an
+# empty New/Resolved split isn't worth a Gemini round-trip or a consent
+# question about it. Kept as its own opt-in (not folded into the main
+# findings consent above) since it's a distinct piece of information - not
+# a snapshot of current exposure, but how the ruleset moved over time,
+# which arguably matters more to whoever's tracking remediation progress.
+$includeTrend = $false
+if ($comparison -and (($comparison.New.Count -gt 0) -or ($comparison.Resolved.Count -gt 0))) {
+    $trendAnswer = Read-Host "This run includes a comparison against a previous report ($($comparison.New.Count) new, $($comparison.Resolved.Count) resolved). Also ask Gemini for a short trend narrative about the changes? (Y/N)"
+    if ($trendAnswer -match '^[Yy]') { $includeTrend = $true }
+}
+
 # 5) A large ruleset can produce enough findings to exceed Gemini's
 # free-tier per-minute input-token quota in a single request (seen in
 # practice around ~4,000 rules). Rather than fail outright, split into
@@ -505,10 +550,13 @@ if ($batches.Count -gt 1) {
 $mergedResult = [PSCustomObject]@{
     executive_summary        = ""
     remediation_order        = @()
+    comparison_narrative     = ""
     application_suggestions  = @()
     mitre_mappings           = @()
+    trend_narrative          = ""
 }
 $executiveSummaries = @()
+$batchSeverityWeight = @()
 
 for ($bi = 0; $bi -lt $batches.Count; $bi++) {
     $batch = $batches[$bi]
@@ -530,6 +578,23 @@ for ($bi = 0; $bi -lt $batches.Count; $bi++) {
         if ($tagsLines.Count -gt 1) { $maskedLines += $tagsLines }
     }
 
+    # Sent once, with the first batch only - the comparison is a
+    # ruleset-wide fact independent of any single findings batch, same
+    # reasoning as everything else sent only once below.
+    if ($bi -eq 0 -and $includeTrend) {
+        $trendLines = @("", "Comparison against a previous report (already computed, not something to recompute):")
+        foreach ($f in $comparison.New) {
+            $maskedDetail = Protect-IPAddresses -Text $f.Detail -Map $ipMap
+            $trendLines += "- NEW [$($f.Severity)] $($f.RuleName) ($($f.Type)): $maskedDetail"
+        }
+        foreach ($f in $comparison.Resolved) {
+            $maskedDetail = Protect-IPAddresses -Text $f.Detail -Map $ipMap
+            $trendLines += "- RESOLVED [$($f.Severity)] $($f.RuleName) ($($f.Type)): $maskedDetail"
+        }
+        $trendLines += "- Still present (unchanged since last run): $($comparison.Persistent.Count) finding(s)"
+        $maskedLines += $trendLines
+    }
+
     $userPrompt = $maskedLines -join "`n"
     $batchLabel = if ($batches.Count -gt 1) { " (batch $($bi + 1)/$($batches.Count))" } else { "" }
     Write-Host "Sending $($batch.Count) finding(s)$batchLabel ($(if ($sendOnlyInternet) { 'internet-only' } else { 'all' })), $($ipMap.Count) masked IP address(es) total to Gemini$(if ($includeTags) { ' (Tags included)' } else { ' (Tags excluded)' })..."
@@ -541,10 +606,21 @@ for ($bi = 0; $bi -lt $batches.Count; $bi++) {
         continue
     }
 
-    if ($batchResult.executive_summary) { $executiveSummaries += $batchResult.executive_summary }
+    if ($batchResult.executive_summary) {
+        $executiveSummaries += $batchResult.executive_summary
+        $critInBatch = @($batch | Where-Object { $_.Severity -eq "Critical" }).Count
+        $highInBatch = @($batch | Where-Object { $_.Severity -eq "High" }).Count
+        $batchSeverityWeight += ($critInBatch * 100 + $highInBatch)
+    }
     if ($batchResult.remediation_order) { $mergedResult.remediation_order = @($mergedResult.remediation_order) + @($batchResult.remediation_order) }
     if ($batchResult.application_suggestions) { $mergedResult.application_suggestions = @($mergedResult.application_suggestions) + @($batchResult.application_suggestions) }
     if ($batchResult.mitre_mappings) { $mergedResult.mitre_mappings = @($mergedResult.mitre_mappings) + @($batchResult.mitre_mappings) }
+    # Only ever sent with the first batch, so at most one batch's result
+    # will actually carry it - a straight assignment, not an append.
+    if ($batchResult.comparison_narrative -and -not $mergedResult.comparison_narrative) {
+        $mergedResult.comparison_narrative = $batchResult.comparison_narrative
+    }
+    if ($batchResult.trend_narrative) { $mergedResult.trend_narrative = $batchResult.trend_narrative }
 
     # A short pause between batches, not just retry-on-failure within one:
     # free-tier quotas are also rate-limited per minute, and firing several
@@ -568,9 +644,52 @@ if ($executiveSummaries.Count -eq 0) {
     return
 }
 
-$mergedResult.executive_summary =
-    if ($executiveSummaries.Count -eq 1) { $executiveSummaries[0] }
-    else { ($executiveSummaries | ForEach-Object { $_ }) -join "`n`n" }
+# Concatenating every batch's summary reads as near-duplicate prose when
+# there's more than one (each batch tends to independently describe the
+# same dominant, ruleset-wide issues, like one broad any/any rule whose
+# shadowed_rule findings are spread across several batches). Using just
+# the summary from the batch with the most Critical/High findings - the
+# most consequential slice - avoids that repetition while still surfacing
+# the most important picture; a note makes clear it's one batch's view,
+# not silently implying it's the only thing that mattered.
+if ($executiveSummaries.Count -eq 1) {
+    $mergedResult.executive_summary = $executiveSummaries[0]
+}
+else {
+    $topBatchIndex = 0
+    $topWeight = $batchSeverityWeight[0]
+    for ($wi = 1; $wi -lt $batchSeverityWeight.Count; $wi++) {
+        if ($batchSeverityWeight[$wi] -gt $topWeight) { $topWeight = $batchSeverityWeight[$wi]; $topBatchIndex = $wi }
+    }
+    $mergedResult.executive_summary = $executiveSummaries[$topBatchIndex] + "`n`n*(This ruleset needed $($executiveSummaries.Count) separate batches to send to Gemini; the summary above reflects the batch with the most Critical/High findings. The remediation list below draws from every batch.)*"
+}
+
+# Same repetition problem as the summaries, for the same reason: a
+# rule like a broad any/any allow can show up as the subject of a
+# recommendation in several batches independently. Exact-string dedup
+# won't catch it (each batch phrases it slightly differently), so this
+# extracts likely rule-name tokens (PAN-OS names in this ruleset are
+# consistently ALL-CAPS-WITH-UNDERSCORES) from each recommendation and
+# drops later items that share one with an already-kept item. Imperfect
+# (misses duplicates with no shared rule-name token, and rarely drops a
+# genuinely distinct second recommendation that happens to mention the
+# same rule) but removes the most damaging repetition - the same
+# headline rule recommended for removal three or four times over.
+if ($mergedResult.remediation_order.Count -gt 0) {
+    $seenRuleTokens = New-Object System.Collections.Generic.HashSet[string]
+    $dedupedOrder = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $mergedResult.remediation_order) {
+        $tokens = [regex]::Matches($item, '\b[A-Z][A-Z0-9_]{3,}\b') | ForEach-Object { $_.Value }
+        $alreadySeen = $false
+        foreach ($t in $tokens) {
+            if ($seenRuleTokens.Contains($t)) { $alreadySeen = $true; break }
+        }
+        if ($alreadySeen) { continue }
+        foreach ($t in $tokens) { [void]$seenRuleTokens.Add($t) }
+        $dedupedOrder.Add($item)
+    }
+    $mergedResult.remediation_order = @($dedupedOrder)
+}
 
 $llmResult = $mergedResult
 
@@ -623,7 +742,7 @@ if ($llmResult) {
     # no cheaper way to get the Suggested Fix column populated (both the
     # deterministic entries just applied and any AI ones) than re-running
     # the same render call now that findings carry updated values.
-    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM
+    $reportLines = Get-ReportLines -Findings $findings -Inventory $inventory -InputCsvPath $InputCsv -Rules $rules -ElapsedText $elapsedText -InternetZoneSet $InternetZoneSet -CompareToPath $CompareTo -AddressObjectsCsvPath $AddressObjectsCsv -AddressGroupsCsvPath $AddressGroupsCsv -CriticalZoneSet $CriticalZoneSet -StaleHitDays $StaleHitDays -MaxAddressListSize $MaxAddressListSize -SkipLLM:$SkipLLM -ComparisonNarrative $llmResult.comparison_narrative
 
     $aiLines = @("", "## AI-Assisted Summary (Gemini, IP addresses masked before sending)", "")
     $aiLines += $llmResult.executive_summary
@@ -644,4 +763,5 @@ if ($llmResult) {
     $reportLines += $aiLines
     Save-HtmlReport -MarkdownLines $reportLines -HtmlPath $OutHtml
     Write-Host "AI section added to $OutHtml" -ForegroundColor Green
+    if ($OutJson) { Export-FindingsJson -Findings $findings -Rules $rules -JsonPath $OutJson -InputCsvPath $InputCsv -ToolVersion $script:MooseAltoVersion }
 }
