@@ -462,6 +462,11 @@ containment. Passing `-AddressObjectsCsv` and/or `-AddressGroupsCsv`
 resolves these names to their actual member IP(s)/CIDR(s) first, so
 duplicate/shadow detection and internet-exposure checks work on the real
 underlying addresses instead of the object name.
+When resolution actually changes something, the Findings table (report
+and CSV) and the Internet Exposure Inventory show the resolved IP/CIDR
+alongside the raw object or group name (e.g. `Network1 (10.0.0.0/8)`),
+so you don't need to cross-reference the objects file separately to
+know what a name means. Left as just the name when nothing resolved.
 
 - Nested groups are resolved recursively.
 - `ip-netmask` objects resolve to real CIDR containment logic; `ip-range`
@@ -574,6 +579,43 @@ This ranking also drives report ordering (`$SeverityOrder`:
 Critical=0, High=1, Medium=2, Low=3) and it's the same ranking the AI
 summary is told to respect when proposing a remediation order.
 
+## SIEM export (optional)
+
+`-OutJson` writes the findings as JSON Lines (one finding per line, each
+an independently parseable JSON object with metadata repeated on every
+line) rather than a single nested document. This is what log-oriented
+ingestion like Splunk indexes automatically, with no unpacking required.
+Written once after the deterministic report, and again (overwriting)
+after the optional Gemini step if that ran, so it reflects Suggested
+Fix/MITRE tags when available.
+
+**Getting it into Splunk:** point a Universal Forwarder at the file. In
+`inputs.conf`:
+
+```ini
+[monitor:///path/to/moosealto/reports/*.json]
+sourcetype = moosealto_findings
+```
+
+And in `props.conf`, to make sure Splunk parses it as JSON:
+
+```ini
+[moosealto_findings]
+INDEXED_EXTRACTIONS = json
+```
+
+From there, `severity`, `rule_name`, `type`, `mitre_attack` (when
+present), and every other field are immediately searchable - no
+`spath`/`mvexpand` needed. A couple of starting points:
+
+```spl
+index=moosealto_findings severity=Critical | stats count by rule_name, type
+```
+
+for a dashboard, or a scheduled search comparing findings across runs
+(using `input_file` and `generated_at` to tell them apart) to alert only
+on newly-appeared Critical findings.
+
 ## File structure
 
 ```
@@ -653,17 +695,20 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
   interface, pass `-InternetZones` explicitly, or internet-exposure checks
   will under-report.
 - **IPv4 only.** Containment (used by shadow/duplicate detection) does real interval math for plain CIDR/IP and "IP-IP" ranges, including mixing the two (e.g. correctly detecting that a range is fully inside a broader CIDR). A [Negate] X broader side (or multiple, which combine with AND semantics, matching only if the address avoids all of them) is also handled against a plain CIDR/range narrower side: covered if the narrower interval has zero overlap with every excluded range. Two narrower cases still fall back to exact string match rather than true containment: a [Negate] narrower side (rare enough in practice not to be worth the added complexity), and comparing two different negated expressions to each other (identical ones still match exactly, just not a genuinely different-but-overlapping pair). Address-object names are also exact-match, but only actually matters when -AddressObjectsCsv isn't supplied: when it is, names are resolved to real addresses before any comparison happens.
-- **Direction and exposure-related checks treat zone="any" as weaker
-  evidence than a specifically named zone.** If the address field on
+- - **Direction- and exposure-related checks treat zone="any" as weaker
+  evidence than a specifically-named zone.** If the address field on
   that same side is exclusively a plain, non-negated, specific
   IP/CIDR (private or otherwise), that address overrides a zone="any"
   signal, since PAN-OS matches zone and address together on a rule, not
-  either alone. Applies to direction classification and to
-  `unrestricted_access_to_critical_zone`,
-  `unrestricted_egress_from_critical_zone`, and
-  `internet_exposed_any_field`. A specifically-named zone (e.g.
-  Untrust, or a configured critical zone) is trusted as-is regardless of
-  address.
+  either alone. A specifically-named zone (e.g. Untrust, or a configured
+  critical zone) is trusted as-is regardless of address. Separately,
+  zone="any" is only treated as potentially internet-facing at all when
+  at least one zone actually used somewhere in the ruleset matches a
+  configured `-InternetZones` name - on a purely internal firewall (no
+  Untrust/external-equivalent interface exists on the device at all),
+  "any" matching "every zone the firewall knows about" correctly can't
+  include the internet, since none of those zones is the internet. A
+  concrete public/negated address is unaffected either way.
 - **This is a hygiene review aid, not an authoritative security audit.**
   Always have a human review findings, especially `shadowed_rule` and
   anything touching the internet, before changing production policy.
