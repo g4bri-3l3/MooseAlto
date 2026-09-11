@@ -433,7 +433,15 @@ function Resolve-AddressToken {
 
     if ($Objects.ContainsKey($key)) {
         $obj = $Objects[$key]
-        if ($obj.Type -eq "ip-netmask" -and (Test-IsPlainIP $obj.Value)) {
+        # Real exports spell this type differently across PAN-OS versions
+        # and export tools - "ip-netmask" (the API/CLI name), "IP Netmask"
+        # (title case with a space, seen from some GUI-driven exports),
+        # etc. Normalized (lowercased, spaces collapsed to hyphens) before
+        # comparing so the object actually resolves regardless of which
+        # spelling this particular export used, instead of silently
+        # falling through to the unresolved-token case below.
+        $normalizedType = ($obj.Type -replace '\s+', '-').ToLower()
+        if ($normalizedType -eq "ip-netmask" -and (Test-IsPlainIP $obj.Value)) {
             return @($obj.Value)
         }
         return @("$($obj.Name)[$($obj.Type)]=$($obj.Value)")
@@ -466,3 +474,4 @@ function Resolve-AddressList {
     }
     return @($resolved | Select-Object -Unique)
 }
+

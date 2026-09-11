@@ -69,6 +69,70 @@ $RiskyApplications = @{
     "dns-over-https" = "DNS over HTTPS"
 }
 
+function Merge-CustomRiskyTaxonomy {
+    # Extends (never replaces) the built-in risky-port/application tables
+    # above with entries from a user-supplied JSON file, so an
+    # environment-specific port or App-ID name doesn't require editing
+    # this script directly. A custom entry sharing a key with a built-in
+    # one overrides just that entry's label, everything else built-in
+    # stays. Expected shape:
+    # { "riskyPorts": {"31337": "Custom-Backdoor"}, "cleartextPorts": [31337],
+    #   "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"} }
+    # All three top-level keys are optional; an empty or absent one simply
+    # contributes nothing. Modifies the script-scoped $RiskyPorts,
+    # $CleartextPorts, and $RiskyApplications variables from the caller's
+    # scope in place (hashtables/arrays are reference types in PowerShell,
+    # so this works without an explicit scope modifier as long as the
+    # variables themselves are never reassigned wholesale here).
+    param([string]$Path)
+    if (-not (Test-Path $Path)) {
+        Write-Host "WARNING: Risky taxonomy file not found at '$Path'. Continuing with built-in defaults only." -ForegroundColor Yellow
+        return
+    }
+    try {
+        $customJson = Get-Content -Path $Path -Raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Host "WARNING: Could not parse '$Path' as JSON ($($_.Exception.Message)). Continuing with built-in defaults only." -ForegroundColor Yellow
+        return
+    }
+
+    $addedPorts = 0
+    if ($customJson.riskyPorts) {
+        foreach ($prop in $customJson.riskyPorts.PSObject.Properties) {
+            $portNum = 0
+            if ([int]::TryParse($prop.Name, [ref]$portNum)) {
+                $RiskyPorts[$portNum] = [string]$prop.Value
+                $addedPorts++
+            }
+            else {
+                Write-Host "WARNING: Skipping non-numeric riskyPorts key '$($prop.Name)' in '$Path'." -ForegroundColor Yellow
+            }
+        }
+    }
+
+    $addedCleartext = 0
+    if ($customJson.cleartextPorts) {
+        foreach ($p in $customJson.cleartextPorts) {
+            $portNum = 0
+            if ([int]::TryParse([string]$p, [ref]$portNum) -and $CleartextPorts -notcontains $portNum) {
+                $script:CleartextPorts = @($CleartextPorts) + @($portNum)
+                $addedCleartext++
+            }
+        }
+    }
+
+    $addedApps = 0
+    if ($customJson.riskyApplications) {
+        foreach ($prop in $customJson.riskyApplications.PSObject.Properties) {
+            $RiskyApplications[$prop.Name.ToLower()] = [string]$prop.Value
+            $addedApps++
+        }
+    }
+
+    Write-Host "Loaded custom risky taxonomy from '$Path': $addedPorts port(s), $addedCleartext cleartext port(s), $addedApps application(s) added/overridden." -ForegroundColor DarkGray
+}
+
 # --------------------------------------------------------------------------
 # Internet-exposure and critical-zone helpers
 # --------------------------------------------------------------------------
@@ -76,9 +140,17 @@ $RiskyApplications = @{
 
 function Test-ZoneTouchesInternet {
     param([array]$Zones, [array]$InternetZoneSet)
+    # $script:AnyZoneImpliesInternet is computed once at the top of
+    # Invoke-DeterministicChecks (see the comment there). Defaults to
+    # $true when unset - e.g. this function called before that
+    # computation runs, or from a context that never sets it - the
+    # historical, more permissive behavior, so nothing regresses for a
+    # caller that hasn't opted into this check.
+    $anyImpliesInternet = if (Get-Variable -Name AnyZoneImpliesInternet -Scope Script -ErrorAction SilentlyContinue) { $script:AnyZoneImpliesInternet } else { $true }
     foreach ($z in $Zones) {
         $zl = $z.Trim().ToLower()
-        if ($zl -eq "any" -or $InternetZoneSet -contains $zl) { return $true }
+        if ($InternetZoneSet -contains $zl) { return $true }
+        if ($zl -eq "any" -and $anyImpliesInternet) { return $true }
     }
     return $false
 }
@@ -298,6 +370,27 @@ function Test-SideIsInternet {
 function Invoke-DeterministicChecks {
     param([array]$Rules, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25)
     $findings = @()
+
+    # Computed once, not per-rule: does at least one zone actually used
+    # anywhere in this ruleset match a configured internet zone name? On a
+    # purely internal firewall (no Untrust/external-equivalent interface
+    # exists on the device at all), the answer is no - and in that case,
+    # zone="any" matching "every zone the firewall knows about" can never
+    # include the internet, because none of those zones IS the internet.
+    # Treating zone="any" as internet-touching regardless (the historical
+    # behavior) made sense as a default assuming SOME internet-facing zone
+    # probably exists somewhere in the ruleset, but produces a flood of
+    # false "touches the internet" findings on a ruleset where that
+    # assumption is simply false. Read by Test-ZoneTouchesInternet below;
+    # a real, concrete public/negated address is unaffected either way,
+    # since that's evidence independent of zone naming entirely.
+    $script:AnyZoneImpliesInternet = $false
+    foreach ($rule in $Rules) {
+        foreach ($z in (@($rule.SrcZone) + @($rule.DstZone))) {
+            if ($InternetZoneSet -contains $z.Trim().ToLower()) { $script:AnyZoneImpliesInternet = $true; break }
+        }
+        if ($script:AnyZoneImpliesInternet) { break }
+    }
 
     # Computed once, not per-rule: does the Options column actually carry
     # logging information anywhere in this ruleset? Some export types
@@ -1250,8 +1343,8 @@ function Build-InternetExposureInventory {
         $inventory += [PSCustomObject]@{
             Direction   = $direction
             RuleName    = $rule.Name
-            Src         = "$($rule.SrcZone -join ';') / $($rule.SrcAddrRaw)"
-            Dst         = "$($rule.DstZone -join ';') / $($rule.DstAddrRaw)"
+            Src         = "$($rule.SrcZone -join ';') / $(Get-DisplayAddress -Raw $rule.SrcAddrRaw -Resolved $rule.SrcAddr)"
+            Dst         = "$($rule.DstZone -join ';') / $(Get-DisplayAddress -Raw $rule.DstAddrRaw -Resolved $rule.DstAddr)"
             Application = if ($rule.Application) { $rule.Application -join "," } else { "any" }
             Service     = $rule.ServiceRaw
             Action      = $rule.Action

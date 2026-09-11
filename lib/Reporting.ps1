@@ -28,6 +28,21 @@ function Protect-IPAddresses {
 $SeverityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
 
 
+function Get-DisplayAddress {
+    # Shows the resolved IP/CIDR alongside the raw object/group name when
+    # -AddressObjectsCsv/-AddressGroupsCsv resolution actually changed
+    # something, so a reader sees what a name like "Rete1" or "h-10.5.5.5"
+    # actually means without needing to cross-reference the objects file
+    # separately. Left as just the raw value when resolution didn't apply
+    # (no objects file given, or the token was already a plain IP/CIDR) -
+    # showing "10.5.5.5/32 (10.5.5.5/32)" would be pure noise.
+    param([string]$Raw, [array]$Resolved)
+    $resolvedText = if ($Resolved) { ($Resolved -join ";") } else { "" }
+    if (-not $resolvedText) { return $Raw }
+    if ($resolvedText.Trim().ToLower() -eq $Raw.Trim().ToLower()) { return $Raw }
+    return "$Raw ($resolvedText)"
+}
+
 function Get-SvgPieChart {
     # Dependency-free donut chart: plain SVG, no charting library. Drawn
     # as concentric ring strokes with stroke-dasharray/-dashoffset (each
@@ -144,7 +159,7 @@ function Get-FindingsComparison {
 }
 
 function Get-ReportLines {
-    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM)
+    param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM, [string]$ComparisonNarrative = "")
 
     # Look up Source/Destination/Action/Profile by rule name at render time,
     # rather than attaching them to every finding at creation. This avoids
@@ -152,8 +167,8 @@ function Get-ReportLines {
     $ruleLookup = @{}
     foreach ($r in $Rules) {
         $ruleLookup[$r.Name] = [PSCustomObject]@{
-            Src         = "$($r.SrcZone -join ';') / $($r.SrcAddrRaw)"
-            Dst         = "$($r.DstZone -join ';') / $($r.DstAddrRaw)"
+            Src         = "$($r.SrcZone -join ';') / $(Get-DisplayAddress -Raw $r.SrcAddrRaw -Resolved $r.SrcAddr)"
+            Dst         = "$($r.DstZone -join ';') / $(Get-DisplayAddress -Raw $r.DstAddrRaw -Resolved $r.DstAddr)"
             Application = if ($r.Application) { $r.Application -join "," } else { "any" }
             Service     = $r.ServiceRaw
             Action      = $r.Action
@@ -459,6 +474,10 @@ function Get-ReportLines {
             $compareBytes = [System.Text.Encoding]::UTF8.GetBytes($compareCardsHtml)
             $lines += "%%RAWHTML_BASE64%%$([System.Convert]::ToBase64String($compareBytes))"
             $lines += ""
+            if ($ComparisonNarrative) {
+                $lines += "> **AI trend assessment:** $ComparisonNarrative"
+                $lines += ""
+            }
             $lines += "New, resolved, and still-present findings are marked in the Comparison column of the table below."
             $lines += ""
         }
@@ -583,7 +602,18 @@ privacy. Refer to them by their placeholder token, never guess a real address.
 You may also be given a "Tags" section listing free-text tags for the flagged
 rules. Use these only as extra context (e.g. a tag mentioning "temporary" or
 a ticket number is worth surfacing), never as a basis for inventing new
-technical findings.
+technical findings. You may also be given a "Findings Comparison" section:
+counts and specific items of what's new, resolved, or still present
+compared to a previous run of this same ruleset. The findings list may be labeled "(batch N of M)" when
+the full ruleset was too large for one request and got split - if you see
+this with M greater than 1, you are seeing only a slice of the findings, not
+the whole ruleset. Write your executive summary about what's actually IN
+this batch specifically, not as if it were a complete assessment of
+everything - phrases like "the ruleset exhibits..." or "overall posture..."
+overstate what a partial batch can support. A short, scoped observation
+("this batch's findings center on X and Y") is more honest and, just as
+importantly, avoids each batch's summary reading as a near-duplicate of
+every other batch's when they get combined afterward.
 
 Your job:
 - Write a short executive-readable summary (3-5 sentences) of the overall
@@ -615,15 +645,26 @@ Your job:
   Application Layer Protocol" just because it's network traffic - that's too
   generic to be useful). Cite the specific tactic the technique falls under
   (e.g. "Lateral Movement", "Exfiltration").
+- If a "Findings Comparison" section is given, write a short (2-4 sentence)
+  narrative of the trend since the previous run: what got fixed, what's
+  new, and whether the overall trajectory looks like real progress or
+  just churn (e.g. resolved findings reappearing under a new rule name
+  would be a sign of the latter, if the data suggests it - but don't
+  speculate beyond what the counts and listed items actually show).
+  Reference specific rule names from the New/Resolved lists when they
+  illustrate the point, not just the counts. If nothing changed at all,
+  say that plainly rather than padding it into a longer narrative.
 
 Respond with a single JSON object only, no markdown fences, matching this schema:
 { "executive_summary": "...", "remediation_order": ["...", "...", "..."],
   "application_suggestions": [ { "rule_name": "...", "type": "...", "suggested_application": "...", "reasoning": "..." } ],
-  "mitre_mappings": [ { "rule_name": "...", "type": "...", "technique_id": "...", "technique_name": "...", "tactic": "..." } ] }
+  "mitre_mappings": [ { "rule_name": "...", "type": "...", "technique_id": "...", "technique_name": "...", "tactic": "..." } ],
+  "comparison_narrative": "..." }
 The application_suggestions array may be empty if no finding of the eligible
 types was given, or if none had enough of a hint to guess from. The
 mitre_mappings array may be empty if nothing given maps clearly to a known
-technique.
+technique. Omit comparison_narrative entirely (not an empty string) if no
+"Findings Comparison" section was given.
 "@
 
 function Invoke-HttpPostWithSpinner {
@@ -1212,8 +1253,8 @@ function Export-FindingsCsv {
     $ruleLookup = @{}
     foreach ($r in $Rules) {
         $ruleLookup[$r.Name] = [PSCustomObject]@{
-            Src         = "$($r.SrcZone -join ';') / $($r.SrcAddrRaw)"
-            Dst         = "$($r.DstZone -join ';') / $($r.DstAddrRaw)"
+            Src         = "$($r.SrcZone -join ';') / $(Get-DisplayAddress -Raw $r.SrcAddrRaw -Resolved $r.SrcAddr)"
+            Dst         = "$($r.DstZone -join ';') / $(Get-DisplayAddress -Raw $r.DstAddrRaw -Resolved $r.DstAddr)"
             Application = if ($r.Application) { $r.Application -join "," } else { "any" }
             Service     = $r.ServiceRaw
             Action      = $r.Action
@@ -1244,6 +1285,71 @@ function Export-FindingsCsv {
 
     $rows | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8
     Write-Host "CSV findings written to $CsvPath" -ForegroundColor Green
+}
+
+function Export-FindingsJson {
+    # JSON Lines (one finding per line, each an independently parseable
+    # JSON object), not a single nested document - this is what Splunk
+    # (and most log-oriented SIEM ingestion) handles automatically without
+    # extra config: each line becomes its own event, and top-level fields
+    # like severity/rule_name/type are immediately searchable/aggregable
+    # (e.g. "stats count by severity") with no spath/mvexpand needed to
+    # first unpack a nested array. Metadata (tool, tool_version,
+    # generated_at, input_file) is repeated on every line rather than
+    # given once at a file level, since each line needs to stand alone as
+    # its own event - there's no single-event summary line mixed in here
+    # for the same reason: a differently-shaped line would either break
+    # automatic field extraction or show up as a stray, oddly-shaped
+    # event. Aggregate counts are a trivial SPL query away
+    # ("stats count by severity") and don't need precomputing here.
+    # Includes SuggestedFix and MitreTag when present (only after the
+    # optional Gemini step), omitted rather than emitted as null noise
+    # when they were never computed for this run.
+    param([array]$Findings, [array]$Rules, [string]$JsonPath, [string]$InputCsvPath, [string]$ToolVersion)
+
+    $ruleLookup = @{}
+    foreach ($r in $Rules) {
+        $ruleLookup[$r.Name] = [PSCustomObject]@{
+            SourceZone          = $r.SrcZone
+            SourceAddress       = $r.SrcAddrRaw
+            DestinationZone     = $r.DstZone
+            DestinationAddress  = $r.DstAddrRaw
+            Application         = if ($r.Application) { $r.Application } else { @("any") }
+            Service             = $r.ServiceRaw
+            Action              = $r.Action
+            Profile             = if ($r.Profile) { $r.Profile } else { "none" }
+        }
+    }
+
+    $generatedAt = (Get-Date).ToString("o")
+    $sorted = $Findings | Sort-Object { $SeverityOrder[$_.Severity] }
+    $lines = foreach ($f in $sorted) {
+        $ctx = $ruleLookup[$f.RuleName]
+        $row = [ordered]@{
+            generated_at = $generatedAt
+            tool         = "MooseAlto"
+            tool_version = $ToolVersion
+            input_file   = $InputCsvPath
+            severity     = $f.Severity
+            rule_name    = $f.RuleName
+            type         = $f.Type
+            detail       = $f.Detail
+            source_zone         = if ($ctx) { $ctx.SourceZone } else { @() }
+            source_address      = if ($ctx) { $ctx.SourceAddress } else { "" }
+            destination_zone    = if ($ctx) { $ctx.DestinationZone } else { @() }
+            destination_address = if ($ctx) { $ctx.DestinationAddress } else { "" }
+            application  = if ($ctx) { $ctx.Application } else { @() }
+            service      = if ($ctx) { $ctx.Service } else { "" }
+            action       = if ($ctx) { $ctx.Action } else { "" }
+            profile      = if ($ctx) { $ctx.Profile } else { "" }
+        }
+        if ($f.SuggestedFix) { $row["suggested_fix"] = $f.SuggestedFix }
+        if ($f.MitreTag) { $row["mitre_attack"] = $f.MitreTag }
+        ([PSCustomObject]$row | ConvertTo-Json -Depth 5 -Compress)
+    }
+
+    $lines | Out-File -FilePath $JsonPath -Encoding utf8
+    Write-Host "JSON Lines findings written to $JsonPath ($($lines.Count) line(s), one finding per line - see README for a Splunk ingestion example)" -ForegroundColor Green
 }
 
 function Export-InventoryCsv {
