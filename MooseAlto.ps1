@@ -247,6 +247,11 @@ if (-not $InputCsv) {
         if ($inputVal) { $ApiKey = $inputVal }
     }
 
+    if (-not $SkipLLM) {
+        $inputVal = Read-Host "Gemini model to use [$Model]"
+        if ($inputVal) { $Model = $inputVal }
+    }
+
     # Review-and-edit loop, once the guided pass above has a full set of
     # answers: enough parameters exist now that reviewing them all in one
     # place before committing is genuinely useful, not just "answer once,
@@ -254,7 +259,7 @@ if (-not $InputCsv) {
     # Metasploit's show options / set X / run, minus the module system -
     # there's only ever one "module" here.
     $paramOrder = @("InputCsv", "OutHtml", "OutCsv", "InternetZones", "CriticalZones", "AddressObjectsCsv", "AddressGroupsCsv", "StaleHitDays", "MaxAddressListSize", "CompareTo", "SkipLLM")
-    if (-not $SkipLLM) { $paramOrder += "ApiKey" }
+    if (-not $SkipLLM) { $paramOrder += "ApiKey"; $paramOrder += "Model" }
     $paramPrompts = @{
         InputCsv            = "CSV file to analyze"
         OutHtml              = "HTML report path"
@@ -268,6 +273,7 @@ if (-not $InputCsv) {
         CompareTo            = "Previous findings CSV to compare against"
         SkipLLM              = "Skip AI analysis entirely (y/N)"
         ApiKey               = "Gemini API key"
+        Model                = "Gemini model to use"
     }
 
     while ($true) {
@@ -310,7 +316,10 @@ if (-not $InputCsv) {
         }
         elseif ($targetName -eq "SkipLLM") {
             Set-Variable -Name $targetName -Value ($newVal -match '^[Yy]')
-            if (-not $SkipLLM -and $paramOrder -notcontains "ApiKey") { $paramOrder += "ApiKey" }
+            if (-not $SkipLLM) {
+                if ($paramOrder -notcontains "ApiKey") { $paramOrder += "ApiKey" }
+                if ($paramOrder -notcontains "Model") { $paramOrder += "Model" }
+            }
         }
         else {
             Set-Variable -Name $targetName -Value $newVal
