@@ -673,11 +673,22 @@ function Invoke-HttpPostWithSpinner {
     # this stays in the same process/scope, so it doesn't need any of the
     # dot-sourced functions or script variables re-loaded into a separate
     # runspace. Works the same way on Windows PowerShell 5.1 and PowerShell 7.
-    param([string]$Uri, [string]$JsonBody, [string]$Message = "Contacting Gemini")
+    #
+    # HttpClient's own default timeout is 100 seconds. A larger batch (many
+    # findings, Tags included, MITRE mapping requested) can legitimately take
+    # longer than that for Gemini to answer, and once HttpClient's internal
+    # watchdog fires it cancels the request itself: GetAwaiter().GetResult()
+    # then rethrows a TaskCanceledException whose default message is exactly
+    # "A task was canceled" (localized: "Un'attivita e' stata annullata").
+    # That is not a sign of a bad API key or a malformed request; it just
+    # means the response did not arrive within TimeoutSeconds. Widening the
+    # timeout here reduces how often that happens.
+    param([string]$Uri, [string]$JsonBody, [string]$Message = "Contacting Gemini", [int]$TimeoutSeconds = 180)
 
     Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
 
     $client = [System.Net.Http.HttpClient]::new()
+    $client.Timeout = [System.TimeSpan]::FromSeconds($TimeoutSeconds)
     $content = [System.Net.Http.StringContent]::new($JsonBody, [System.Text.Encoding]::UTF8, "application/json")
 
     try {
@@ -707,7 +718,7 @@ function Invoke-HttpPostWithSpinner {
 }
 
 function Invoke-GeminiNarrative {
-    param([string]$UserPrompt, [string]$ApiKey, [string]$Model, [int]$MaxAttempts = 3)
+    param([string]$UserPrompt, [string]$ApiKey, [string]$Model, [int]$MaxAttempts = 3, [int]$TimeoutSeconds = 180)
     $bodyObj = @{
         system_instruction = @{ parts = @(@{ text = $SystemPrompt }) }
         contents           = @(@{ role = "user"; parts = @(@{ text = $UserPrompt }) })
@@ -725,10 +736,39 @@ function Invoke-GeminiNarrative {
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
-            $result = Invoke-HttpPostWithSpinner -Uri $uri -JsonBody $body -Message "Contacting Gemini (attempt $attempt/$MaxAttempts)"
+            $result = Invoke-HttpPostWithSpinner -Uri $uri -JsonBody $body -Message "Contacting Gemini (attempt $attempt/$MaxAttempts)" -TimeoutSeconds $TimeoutSeconds
         }
         catch {
-            Write-Host "ERROR: Gemini call failed: $($_.Exception.Message)" -ForegroundColor Red
+            # A client-side timeout surfaces here as a TaskCanceledException
+            # (sometimes wrapped in the ambient AggregateException from
+            # GetAwaiter().GetResult()), not as an HTTP status code, so it
+            # never reaches the transient-status-code check below. Treat it
+            # the same way: retry with backoff instead of giving up on the
+            # first attempt.
+            $inner = $_.Exception
+            $isTimeout = $false
+            while ($inner) {
+                if ($inner -is [System.Threading.Tasks.TaskCanceledException] -or $inner -is [System.TimeoutException]) {
+                    $isTimeout = $true
+                    break
+                }
+                $inner = $inner.InnerException
+            }
+
+            if ($isTimeout -and $attempt -lt $MaxAttempts) {
+                $waitSeconds = [math]::Pow(2, $attempt)
+                Write-Host "Note: Gemini call timed out after $TimeoutSeconds s (attempt $attempt/$MaxAttempts). This usually means the response took longer than expected to arrive, not a problem with the request. Retrying in $waitSeconds s..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $waitSeconds
+                $result = $null
+                continue
+            }
+
+            if ($isTimeout) {
+                Write-Host "ERROR: Gemini call timed out after $TimeoutSeconds s on every attempt. The batch may be too large, or the network/proxy path to generativelanguage.googleapis.com is slow right now. Consider a smaller batch or a longer timeout." -ForegroundColor Red
+            }
+            else {
+                Write-Host "ERROR: Gemini call failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
             return $null
         }
 
