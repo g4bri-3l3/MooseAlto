@@ -11,11 +11,26 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - RiskyTaxonomyPath: an optional JSON file extending the built-in risky-port/application tables with environment-specific entries.
 - OutJson: a structured JSON Lines export of the findings (one finding per line, each an independently parseable JSON object with metadata repeated on every line) meant for a SIEM or other automated consumer. Chosen over a single nested JSON document specifically because log-oriented ingestion (Splunk and similar) indexes JSON Lines automatically, with fields like severity/rule_name/type immediately searchable, no unpacking required. Written once after the deterministic report and again (overwriting) after the optional Gemini step if that ran, so it reflects Suggested Fix/MITRE tags when available.
 - Trend narrative on -CompareTo: when a comparison against a previous report has actual changes, and the optional Gemini step runs, you're asked separately whether to also get a short AI narrative about the trend (what got fixed, what's new, whether it reads as real progress or churn), shown under the New/Resolved/Still-present counts.
+- "-Model" now appears in the guided interactive setup and in the review
+  and edit console, not just on the command line. Prompt shows the
+  current default (gemini 3.7 flash) and accepts a blank answer to keep
+  it. Toggling AI analysis back on inside the console also brings the
+  Model row back with it.
 ### Fixed
 - Zone="any" no longer implies internet-touching on a ruleset where no zone actually named as an internet zone (via -InternetZones) exists anywhere at all - a purely internal firewall, with no Untrust/external- equivalent interface on the device. Computed once per ruleset (does at least one real zone in use anywhere match a configured internet zone name); when the answer is no, "any" matching "every zone the firewall knows about" can no longer include the internet, because none of those zones IS the internet. A concrete public/negated address is unaffected either way, since that evidence is independent of zone naming. Where a real internet zone does exist somewhere in the ruleset, behavior is unchanged.
 - Address-object resolution silently failed for a common variant type spelling: the code matched only the literal string "ip-netmask", so an export using "IP Netmask" never resolved at all, leaving the raw object name as an opaque token for every downstream check that depends on knowing whether an address is public or private. Object types are now normalized (lowercased, spaces collapsed to hyphens) before comparing.
 - A large ruleset needing multiple Gemini batches produced a visibly repetitive AI section: each batch's prompt didn't know it was only seeing a slice of the findings, so every batch tended to write a "complete" executive summary describing the same dominant, ruleset-wide issues (e.g. one broad any/any rule whose shadowed-rule findings spread across several batches), and those near-duplicate summaries were then simply concatenated. Fixed on both ends: batches are now told when they're one of several and asked to describe only what's actually in front of them, and the final report uses just the summary from the batch with the most Critical/High findings (noting how many batches ran) rather than stitching every batch's summary together. The remediation list is also deduplicated by shared rule-name tokens across batches, so the same headline rule recommended three or four times in slightly different words collapses to one entry.
-
+- Gemini calls stopped giving up on the very first client side timeout.
+  HttpClient's own default timeout (100 seconds) could expire before a
+  larger batch got an answer, surfacing as a raw TaskCanceledException
+  ("A task was canceled") straight
+  out of GetAwaiter().GetResult(). That path used to return immediately
+  instead of going through the retry logic already built for transient
+  HTTP errors (429/500/502/503/504), so "attempt 1/3" never actually
+  reached attempt 2 or 3. The request timeout is now explicit (180
+  seconds) and a client side timeout retries with the same exponential
+  backoff as those HTTP errors.
+  
 ## [1.9] - 2026-09-09
 ### Added
 - A fourth chart in Rule Statistics: allow rules by internal-only vs internet-touching (either direction), a simpler two-way split of the same classification the existing four-way Direction chart already used, so "how much of this ruleset is even internet-relevant" doesn't require mentally adding three of that chart's four slices together.
