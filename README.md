@@ -78,6 +78,7 @@ internet, via zone name or a concrete public IP):
   Service object called "smtp", a pre-App-ID naming convention still
   seen on real rulebases), including a name with a port or other suffix
   appended (e.g. "smtp-25").
+  - `exposed_amplification_prone_service`: allow rule reachable from the internet on a UDP service known to be abused for reflection and amplification DDoS (see list below), matched by App-ID or by UDP port through a port parser limited to UDP, since the same port number over TCP does not carry this risk (no spoofable, connectionless response). A different risk framing from the two checks above: those are about this network being compromised through a risky inbound service; this one is about this network's own server being abused to bounce large UDP responses at a spoofed third party victim. High severity.
 - `outbound_risky_application` / `outbound_risky_port`: same high-risk
   port/App-ID list, but for a purely outbound rule (source internal,
   destination internet). An internal host allowed to
@@ -179,6 +180,8 @@ default since this is entirely org-specific):
   If anything, it's more restrictive than intended, but a functional bug
   worth fixing before someone "resolves" the symptom by adding an even
   broader rule higher up.
+  - `generalization_anomaly`: an earlier, narrower rule fully covered by a later, broader rule using a different action (the Al-Shaer/Hamed Generalization anomaly, the same term Palo Alto Strata Cloud Manager uses in its Policy Analyzer for this exact relationship). The mirror image of `shadowed_rule` above: there the earlier rule wins and the later one is dead; here the later rule is broader but the earlier, narrower one still fires first as a deliberate looking exception. The risk is fragility, not brokenness: if that narrow rule is ever removed during cleanup, on the wrong assumption the broad rule already covers it, or the two are reordered, the effective behavior for its traffic changes silently. Low severity, a warning to confirm the exception is known and intentional. Found through a bounded backward scan, run only when the current rule looks broad enough to plausibly generalize something (wildcard zone, or source/destination address left as any), so the added cost scales with how many such broad rules exist, not with the square of the ruleset size.
+- `correlation_anomaly`: two rules with different actions whose match criteria partially overlap without either one containing the other (Strata Cloud Manager calls this Correlations, the other half of the same Al-Shaer/Hamed pair as Generalization above). Neither rule is dead and neither is a deliberate exception; for traffic caught in the overlap, the effective action depends only on which rule sits first in the rulebase, something neither rule states on its own. Low severity, reported once per rule against the first earlier rule it overlaps with.
 - `zero_hit_count`: recorded hit count of zero, detected from whichever
   column contains "Hit Count" in its name (only if your export has one).
 - `rule_usage_unused` / `rule_usage_partially_used`: Panorama's own Rule
@@ -247,6 +250,7 @@ default since this is entirely org-specific):
 - `oversized_address_list`: source or destination lists more than -MaxAddressListSize (default 25) individual addresses. A rule with lot of individually-enumerated addresses is just as hard to audit as one with "any", even though nothing here literally says so. Several firewall audit checklists specifically call this out as its own finding, distinct from the any/none-based checks above.
 - `no_logging_enabled`: allow rule shows no evidence of logging in the Options field: neither "session start"/"session end" (PAN-OS's own logging settings) nor a Log Forwarding profile. Logging and forwarding are separate PAN-OS settings: a log entry is created locally on the firewall as soon as session start/end logging is on, regardless of whether a Log Forwarding profile also sends it elsewhere. Either signal alone is enough to not flag this, since a local, queryable audit trail already exists. Only checked when the Options column both exists AND has been confirmed to carry logging information somewhere in the ruleset; otherwise skipped entirely to avoid flagging every rule on an export type that doesn't include this detail in the first place.
 - `rule_name_action_mismatch`: the rule name suggests it denies/blocks traffic (a token like "deny", "block", "drop") but Action is actually allow, or vice versa (a name suggesting "allow"/"permit" on a rule that's actually deny/drop). Whoever reads the ruleset by name alone would reasonably draw the wrong conclusion about what a rule does. Checked by exact token, not substring; a name containing both a deny-style and an allow-style token is skipped as ambiguous rather than guessed at. Applies regardless of action (the one check in this file that needs to see deny/drop rules too, not just allow ones).
+- `generic_rule_name`: rule named after a generic template rather than what it actually controls, such as Rule 5, New Rule, Policy #12, or a bare number (matched in both English and Italian). This kind of name only works if the reader also knows the rule order; on its own it says nothing about the traffic. Low severity.
 
 **Known public DNS resolvers checked:** Google (8.8.8.8, 8.8.4.4),
 Cloudflare (1.1.1.1, 1.0.0.1), Quad9 (9.9.9.9, 149.112.112.112, 9.9.9.10),
@@ -280,6 +284,13 @@ pop3, imap, snmp, ldap, ms-rdp, ms-sql-db, mysql, oracle, vnc, ms-ds-smb/smb,
 rsh, rlogin, pptp, postgres, redis, mongodb, elasticsearch-base, anydesk,
 teamviewer, logmein, logmein-gotomypc, splashtop, chrome-remote-desktop,
 dns-over-https. **Verify these names against App-ID database (https://applipedia.paloaltonetworks.com/).**
+
+**Amplification prone UDP ports and applications checked:** 17 (QOTD), 19
+(Chargen), 123 (NTP), 137 (NetBIOS Name Service), 1900 (SSDP/UPnP), 5353
+(mDNS), 11211 (Memcached), plus the App-ID names ntp, ssdp, netbios-ns.
+Deliberately conservative: SNMP (161) and LDAP (389) are already covered by
+the high risk port list above and not duplicated here, and only high
+confidence App-ID names are included. **Verify these names against App-ID database (https://applipedia.paloaltonetworks.com/)**, same caveat as the high risk application list above.
 
 ## Comparing against a previous report
 
@@ -518,6 +529,7 @@ internet exploitability**:
   - `no_security_profile_on_exposed_rule`
   - `shadowed_rule`
   - `internal_risky_application` / `internal_risky_port`
+  - `exposed_amplification_prone_service`
   - `negated_rfc1918_effectively_public`
   - `all_rfc1918_effectively_private`
   - `rule_name_action_mismatch`
@@ -547,6 +559,9 @@ internet exploitability**:
   - `rule_usage_partially_used`
   - `missing_explicit_intrazone_internet_deny`
   - `temporary_tag_still_present`
+  - `generalization_anomaly`
+  - `correlation_anomaly`
+  - `generic_rule_name`
 
 **Notes:**
 - **`shadowed_rule` is High**. A dead rule isn't itself
@@ -574,7 +589,27 @@ internet exploitability**:
   only ever reached High. `any_any_any_allow` itself only fires on the
   literal string "any", so a functionally identical rule reached through
   a named zone was understated.
-
+- **`exposed_amplification_prone_service` is High, not Critical**, even
+  though it is reachable directly from the internet on a UDP service.
+  Unlike `inbound_risky_port`/`inbound_risky_application`, the direct
+  victim here is not this network: an attacker does not need to
+  compromise anything on this side, only to have this network's exposed
+  server bounce a forged request toward someone else. Still worth
+  immediate action, since this network's own infrastructure and
+  reputation are involved, but the defining trait of Critical elsewhere
+  in this list is a direct attack path into this network, which this
+  finding does not by itself provide.
+- **`generalization_anomaly` and `correlation_anomaly` are Low**, matching
+  how Al-Shaer and Hamed, and Palo Alto Strata Cloud Manager's Policy
+  Analyzer, classify Generalization and Correlation: warnings to review,
+  not confirmed misconfigurations. Both describe rules that are still
+  doing exactly what they were written to do today; the concern is an
+  ordering dependency that could change silently later (Generalization)
+  or an ambiguous overlap worth a second look (Correlation), not a rule
+  that is already wrong. This is also why they sit well below
+  `shadowed_rule` (High) and `allow_shadows_deny` (Critical) above, which
+  describe rules that are already dead or already dangerous.
+  
 This ranking also drives report ordering (`$SeverityOrder`:
 Critical=0, High=1, Medium=2, Low=3) and it's the same ranking the AI
 summary is told to respect when proposing a remediation order.
