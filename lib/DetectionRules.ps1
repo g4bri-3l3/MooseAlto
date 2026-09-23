@@ -702,6 +702,38 @@ function Invoke-DeterministicChecks {
                     }
                 }
             }
+
+            # Compliance/critical-scope tag without a matching critical
+            # zone: a rule tagged as PCI/SWIFT/CDE-scoped (or similar) but
+            # touching neither side of $CriticalZoneSet at all. Either the
+            # tag is wrong (copy-pasted from another rule, or scope drifted
+            # since the tag was applied), or -CriticalZones is missing a
+            # zone this organization actually considers in scope - both are
+            # worth a second look for anyone using Tags to build a
+            # compliance inventory. Skipped when either zone is "any":
+            # "any" already includes the critical zone among everything
+            # else it matches, so there's no real mismatch to flag there.
+            #
+            # Matched by exact tag token (same splitting convention as the
+            # temp/POC check below), not raw substring, so a tag like
+            # "special-project" doesn't false-positive on "pci" as a
+            # substring of something else entirely.
+            if ($rule.Tags) {
+                $complianceScopeTags = @("pci", "pci-dss", "cde", "swift", "cscf", "hipaa", "phi", "sox", "ffiec", "core-banking", "atm", "hsm")
+                $tagTokensForScope = @($rule.Tags -split '[-_\s\.,;]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
+                $matchedScopeTag = $complianceScopeTags | Where-Object { $tagTokensForScope -contains $_ } | Select-Object -First 1
+                if ($matchedScopeTag) {
+                    $srcTouchesAnyZone = $rule.SrcZone -contains "any"
+                    $dstTouchesAnyZone = $rule.DstZone -contains "any"
+                    $touchesCriticalZone = (Test-ZoneInSet -Zones $rule.SrcZone -ZoneSet $CriticalZoneSet) -or (Test-ZoneInSet -Zones $rule.DstZone -ZoneSet $CriticalZoneSet)
+                    if (-not $touchesCriticalZone -and -not $srcTouchesAnyZone -and -not $dstTouchesAnyZone) {
+                        $findings += [PSCustomObject]@{
+                            RuleName = $rule.Name; Severity = "Medium"; Type = "compliance_tag_without_critical_zone"
+                            Detail   = "Rule is tagged '$($rule.Tags)' (matched compliance/critical-scope keyword '$matchedScopeTag'), but neither its source zone ('$($rule.SrcZone -join ';')') nor its destination zone ('$($rule.DstZone -join ';')') is in the configured critical zone set ($($CriticalZoneSet -join ', ')). Either the tag no longer reflects what this rule actually touches, or -CriticalZones is missing a zone this organization considers in scope. Worth confirming for anyone using Tags to build a compliance inventory."
+                        }
+                    }
+                }
+            }
         }
 
         # A rule tagged as temporary/POC/test that's still broad is a
@@ -1498,6 +1530,49 @@ function Invoke-DeterministicChecks {
         }
     }
 
+    # Ruleset-wide check (not per-rule): whether traffic that falls
+    # through to PAN-OS's implicit default deny actually gets logged
+    # depends on a device-level setting this CSV export has no visibility
+    # into. An explicit, broad deny/drop rule (any zone, any address, any
+    # application, any service) with logging turned on, kept as its own
+    # rule rather than relying on the implicit default, removes that
+    # uncertainty: every packet that doesn't match anything above it is
+    # now guaranteed to leave a record. Not itself a misconfiguration
+    # (this is why it's Low, not the Medium of no_logging_enabled, which
+    # flags a rule that's already known to be unlogged) - just a
+    # defense-in-depth gap worth pointing out.
+    #
+    # Only checked when this export has already been confirmed to carry
+    # real logging information somewhere ($anyRuleShowsLogging, computed
+    # once above): on an export type that never populates the Options
+    # column at all, no rule could ever "show logging evidence" no matter
+    # how it's configured, which would make this check fire on every
+    # single ruleset regardless of its actual setup - not a real signal.
+    #
+    # Looked for anywhere in the enabled ruleset, not strictly the literal
+    # last rule: what matters is that an unshadowed one exists, and the
+    # shadow checks above already catch the case where a broader rule
+    # placed after it would make it dead anyway.
+    if ($anyRuleShowsLogging) {
+        $hasExplicitLoggedCleanupDeny = $false
+        foreach ($rule in $Rules) {
+            if ($rule.Disabled -or ($rule.Action -ne "deny" -and $rule.Action -ne "drop")) { continue }
+            $ruleServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
+            if (($rule.SrcZone -contains "any") -and ($rule.DstZone -contains "any") -and
+                $null -eq $rule.SrcAddr -and $null -eq $rule.DstAddr -and $null -eq $rule.Application -and $ruleServiceEffectivelyAny -and
+                $rule.HasOptionsColumn -and $rule.Options -and ($rule.Options.ToLower() -match "$loggingPattern|$forwardingPattern")) {
+                $hasExplicitLoggedCleanupDeny = $true
+                break
+            }
+        }
+        if (-not $hasExplicitLoggedCleanupDeny) {
+            $findings += [PSCustomObject]@{
+                RuleName = "(ruleset-wide)"; Severity = "Low"; Type = "no_explicit_deny_log_rule"
+                Detail   = "No explicit, broad deny/drop rule (any zone, any address, any application, any service) with logging enabled was found anywhere in the ruleset. Whether traffic that falls through to the implicit default deny actually gets logged depends on a device setting this export has no visibility into. A dedicated cleanup rule at the bottom of the rulebase, deny any/any/any with logging on, removes that uncertainty and guarantees a record of everything that didn't match an explicit rule above it."
+            }
+        }
+    }
+
     return $findings
 }
 
@@ -1527,6 +1602,8 @@ function Add-DeterministicSuggestedFixes {
         "correlation_anomaly"           = "Review the overlapping traffic between the two rules named here. Scope one of them more narrowly, or document which one is meant to take precedence and why."
         "exposed_amplification_prone_service" = "Restrict the source to specific, known hosts, or remove internet reachability entirely if not required for legitimate use."
         "generic_rule_name"             = "Rename this rule to describe the traffic it actually controls (source, destination, or purpose), instead of relying on rule order to convey intent."
+        "compliance_tag_without_critical_zone" = "Confirm with the rule owner whether the tag or the -CriticalZones list is out of date. Update whichever one no longer reflects reality."
+        "no_explicit_deny_log_rule"     = "Add an explicit deny any/any/any rule at the bottom of the rulebase with logging enabled."
     }
     foreach ($f in $Findings) {
         if ($deterministicSuggestions.ContainsKey($f.Type)) {
