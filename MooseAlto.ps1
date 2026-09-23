@@ -139,7 +139,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "2.0"
+$script:MooseAltoVersion = "2.1"
 
 function Show-Banner {
     $lines = @(
