@@ -80,13 +80,16 @@
     finding type), so renaming a rule between runs will show up as a
     resolved finding under the old name and a new one under the new name.
 .PARAMETER RiskyTaxonomyPath
-    Path to a JSON file extending the built-in risky-port/application
-    tables with environment-specific entries, without editing the script.
-    A custom entry sharing a key with a built-in one overrides just that
-    entry's label; everything else built-in stays. Expected shape:
+    Path to a JSON file extending the built-in risky-port/application and
+    amplification-prone-service tables with environment-specific entries,
+    without editing the script. A custom entry sharing a key with a
+    built-in one overrides just that entry's label; everything else
+    built-in stays. Expected shape:
     { "riskyPorts": {"31337": "Custom-Backdoor"}, "cleartextPorts": [31337],
-      "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"} }
-    All three top-level keys are optional.
+      "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"},
+      "amplificationPronePorts": {"20000": "Custom-UDP-Service"},
+      "amplificationProneApplications": {"internal-udp-app": "Custom UDP Service"} }
+    All five top-level keys are optional.
 .PARAMETER OutJson
     Optional path for a structured JSON export of the findings, meant for
     a SIEM, ticketing pipeline, or other automated consumer rather than a
