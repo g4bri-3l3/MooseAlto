@@ -251,6 +251,8 @@ default since this is entirely org-specific):
 - `no_logging_enabled`: allow rule shows no evidence of logging in the Options field: neither "session start"/"session end" (PAN-OS's own logging settings) nor a Log Forwarding profile. Logging and forwarding are separate PAN-OS settings: a log entry is created locally on the firewall as soon as session start/end logging is on, regardless of whether a Log Forwarding profile also sends it elsewhere. Either signal alone is enough to not flag this, since a local, queryable audit trail already exists. Only checked when the Options column both exists AND has been confirmed to carry logging information somewhere in the ruleset; otherwise skipped entirely to avoid flagging every rule on an export type that doesn't include this detail in the first place.
 - `rule_name_action_mismatch`: the rule name suggests it denies/blocks traffic (a token like "deny", "block", "drop") but Action is actually allow, or vice versa (a name suggesting "allow"/"permit" on a rule that's actually deny/drop). Whoever reads the ruleset by name alone would reasonably draw the wrong conclusion about what a rule does. Checked by exact token, not substring; a name containing both a deny-style and an allow-style token is skipped as ambiguous rather than guessed at. Applies regardless of action (the one check in this file that needs to see deny/drop rules too, not just allow ones).
 - `generic_rule_name`: rule named after a generic template rather than what it actually controls, such as Rule 5, New Rule, Policy #12, or a bare number (matched in both English and Italian). This kind of name only works if the reader also knows the rule order; on its own it says nothing about the traffic. Low severity.
+- `compliance_tag_without_critical_zone`: allow rule tagged with a compliance or critical scope keyword (pci, swift, cde, cscf, hipaa, phi, sox, ffiec, core banking, atm, hsm), matched as a whole tag token, whose source and destination zone are both outside the configured `-CriticalZones` set. Either the tag drifted from what the rule actually touches, or `-CriticalZones` is missing a zone the organization already considers in scope. Skipped when either zone is any, since any already reaches the critical zone among everything else. Only checked when `-CriticalZones` is configured, same gate as the two critical zone checks above.
+- `no_explicit_deny_log_rule`: ruleset wide, not tied to one rule. Looks for a broad deny or drop rule (any zone, any address, any application, any service) with logging enabled anywhere in the ruleset. Whether traffic caught by PAN-OS's implicit default deny is actually logged depends on a device setting outside this export's visibility; an explicit, logged cleanup rule removes that uncertainty. Only checked when the export has already been confirmed to carry real logging information somewhere, same gate as `no_logging_enabled` above, otherwise every ruleset would trigger it regardless of actual setup.
 
 **Known public DNS resolvers checked:** Google (8.8.8.8, 8.8.4.4),
 Cloudflare (1.1.1.1, 1.0.0.1), Quad9 (9.9.9.9, 149.112.112.112, 9.9.9.10),
@@ -554,6 +556,7 @@ internet exploitability**:
   - `temporary_tag_but_broad_rule`
   - `oversized_address_list`
   - `no_logging_enabled`
+  - `compliance_tag_without_critical_zone`
 - **Low**: low/informational, no active risk:
   - `disabled_rule_present`
   - `rule_usage_partially_used`
@@ -562,7 +565,8 @@ internet exploitability**:
   - `generalization_anomaly`
   - `correlation_anomaly`
   - `generic_rule_name`
-
+  - `no_explicit_deny_log_rule`
+    
 **Notes:**
 - **`shadowed_rule` is High**. A dead rule isn't itself
   exploitable, but it's classified above simple hygiene items because it
@@ -609,6 +613,12 @@ internet exploitability**:
   that is already wrong. This is also why they sit well below
   `shadowed_rule` (High) and `allow_shadows_deny` (Critical) above, which
   describe rules that are already dead or already dangerous.
+- **`no_explicit_deny_log_rule` is Low, not higher**, because it is a
+  defense in depth recommendation, not confirmed evidence that denied
+  traffic goes unlogged. Real logging of the implicit default deny can
+  exist at the device level in a way this CSV export has no visibility
+  into; the absence of an explicit logged cleanup rule only means the
+  guarantee is missing, not that the gap is definitely being exploited.
   
 This ranking also drives report ordering (`$SeverityOrder`:
 Critical=0, High=1, Medium=2, Low=3) and it's the same ranking the AI
