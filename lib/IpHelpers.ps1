@@ -349,3 +349,53 @@ function Test-ListContains {
     return $true
 }
 
+function Test-NetworksOverlapFast {
+    # Genuine set INTERSECTION, not the containment tested by
+    # Test-NetworksContainFast above. Needed for the Correlation anomaly
+    # check, which looks for two rules whose traffic partially overlaps
+    # without either one containing the other - containment alone can't
+    # tell that case apart from Shadow/Generalization (both of which are
+    # full containment in one direction).
+    #
+    # Same pre-parsed {HasBounds, Start, End, Raw} shape as
+    # Test-NetworksContainFast. Negated ("[Negate] X") tokens are handled
+    # conservatively rather than with the same AND-semantics precision
+    # used there: a list made entirely of negated tokens is treated as
+    # overlapping with anything (a negation carves one range out of
+    # "everything else", so in practice it overlaps almost any other real
+    # range). That can occasionally over-flag a Correlation pair that
+    # doesn't truly overlap once the exclusion is taken into account, but
+    # this is a Low-severity warning finding, and missing a genuine
+    # correlation would be the worse failure mode of the two.
+    param($A, $B)
+    if ($null -eq $A -or $null -eq $B) { return $true }
+    if ($A.Count -eq 0 -or $B.Count -eq 0) { return $true }
+
+    $aAllNegated = (@($A | Where-Object { $_.Raw -notmatch '^\[Negate\]' })).Count -eq 0
+    $bAllNegated = (@($B | Where-Object { $_.Raw -notmatch '^\[Negate\]' })).Count -eq 0
+    if ($aAllNegated -or $bAllNegated) { return $true }
+
+    foreach ($a in $A) {
+        foreach ($b in $B) {
+            if ($a.HasBounds -and $b.HasBounds) {
+                if ($a.Start -le $b.End -and $b.Start -le $a.End) { return $true }
+            }
+            elseif ($a.Raw -eq $b.Raw) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-ListsOverlap {
+    # Same idea as Test-NetworksOverlapFast, for the exact-string Application
+    # and Service lists (Test-ListContains' non-CIDR counterpart): true if
+    # the two lists share at least one value, or either is $null (meaning
+    # "any", which overlaps everything).
+    param($A, $B)
+    if ($null -eq $A -or $null -eq $B) { return $true }
+    foreach ($item in $A) {
+        if ($B -contains $item) { return $true }
+    }
+    return $false
+}
+

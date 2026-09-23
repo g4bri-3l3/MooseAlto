@@ -71,6 +71,22 @@ function Get-ServicePorts {
     return $ports
 }
 
+function Get-ServiceUdpPorts {
+    # Same idea as Get-ServicePorts above, but keeps only ports explicitly
+    # named on UDP ("udp-<port>"/"udp/<port>"), not TCP. Needed for checks
+    # where the transport itself is part of the risk being flagged: UDP's
+    # lack of a handshake is what makes source-spoofed reflection/
+    # amplification abuse possible in the first place, a risk the same
+    # port number over TCP would not carry.
+    param($ServiceTokens)
+    $ports = @()
+    if (-not $ServiceTokens) { return $ports }
+    foreach ($tok in $ServiceTokens) {
+        if ($tok -match '(?i)^udp[/-](\d+)$') { $ports += [int]$Matches[1] }
+    }
+    return $ports
+}
+
 function Repair-DoubleWrappedCsvLine {
     # Some real PAN-OS/Panorama exports wrap the ENTIRE CSV line in an
     # extra outer pair of quotes, doubling every original quote character

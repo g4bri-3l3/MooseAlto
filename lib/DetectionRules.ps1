@@ -69,6 +69,37 @@ $RiskyApplications = @{
     "dns-over-https" = "DNS over HTTPS"
 }
 
+# Protocols historically abused for UDP reflection/amplification DDoS
+# attacks against THIRD PARTIES: a server that answers one of these from
+# the unrestricted internet can be tricked into bouncing a large response
+# at a spoofed victim address, since UDP has no handshake to verify the
+# source actually asked for anything. This is a different risk framing
+# from $RiskyPorts/$RiskyApplications above (there, the concern is THIS
+# network being compromised); here the concern is this firewall's own
+# infrastructure being weaponized against someone else. Deliberately
+# excludes ports/apps already covered above (SNMP/161, LDAP/389) so the
+# same rule doesn't get a near-duplicate finding under two Types - those
+# already get flagged, just under the direct-exposure framing instead.
+#
+# UDP transport specifically matters here (TCP's three-way handshake rules
+# out the classic spoofed-source technique), which is why the port check
+# below uses Get-ServiceUdpPorts rather than the transport-agnostic
+# Get-ServicePorts used elsewhere in this file.
+$AmplificationPronePorts = @{
+    17 = "QOTD"; 19 = "Chargen"; 123 = "NTP"; 137 = "NetBIOS Name Service"
+    1900 = "SSDP/UPnP"; 5353 = "mDNS"; 11211 = "Memcached"
+}
+
+# App-ID names, checked alongside the port list above for rules that use
+# application-default rather than naming the raw port. Kept deliberately
+# short: only names reasonably confident to exist as their own distinct
+# App-ID rather than falling under a generic unknown-udp classification.
+# Verify against your own App-ID database, same caveat as
+# $RiskyApplications above.
+$AmplificationProneApplications = @{
+    "ntp" = "NTP"; "ssdp" = "SSDP/UPnP"; "netbios-ns" = "NetBIOS Name Service"
+}
+
 function Merge-CustomRiskyTaxonomy {
     # Extends (never replaces) the built-in risky-port/application tables
     # above with entries from a user-supplied JSON file, so an
@@ -77,13 +108,16 @@ function Merge-CustomRiskyTaxonomy {
     # one overrides just that entry's label, everything else built-in
     # stays. Expected shape:
     # { "riskyPorts": {"31337": "Custom-Backdoor"}, "cleartextPorts": [31337],
-    #   "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"} }
-    # All three top-level keys are optional; an empty or absent one simply
+    #   "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"},
+    #   "amplificationPronePorts": {"20000": "Custom-UDP-Service"},
+    #   "amplificationProneApplications": {"internal-udp-app": "Custom UDP Service"} }
+    # All five top-level keys are optional; an empty or absent one simply
     # contributes nothing. Modifies the script-scoped $RiskyPorts,
-    # $CleartextPorts, and $RiskyApplications variables from the caller's
-    # scope in place (hashtables/arrays are reference types in PowerShell,
-    # so this works without an explicit scope modifier as long as the
-    # variables themselves are never reassigned wholesale here).
+    # $CleartextPorts, $RiskyApplications, $AmplificationPronePorts, and
+    # $AmplificationProneApplications variables from the caller's scope in
+    # place (hashtables/arrays are reference types in PowerShell, so this
+    # works without an explicit scope modifier as long as the variables
+    # themselves are never reassigned wholesale here).
     param([string]$Path)
     if (-not (Test-Path $Path)) {
         Write-Host "WARNING: Risky taxonomy file not found at '$Path'. Continuing with built-in defaults only." -ForegroundColor Yellow
@@ -130,7 +164,29 @@ function Merge-CustomRiskyTaxonomy {
         }
     }
 
-    Write-Host "Loaded custom risky taxonomy from '$Path': $addedPorts port(s), $addedCleartext cleartext port(s), $addedApps application(s) added/overridden." -ForegroundColor DarkGray
+    $addedAmpPorts = 0
+    if ($customJson.amplificationPronePorts) {
+        foreach ($prop in $customJson.amplificationPronePorts.PSObject.Properties) {
+            $portNum = 0
+            if ([int]::TryParse($prop.Name, [ref]$portNum)) {
+                $AmplificationPronePorts[$portNum] = [string]$prop.Value
+                $addedAmpPorts++
+            }
+            else {
+                Write-Host "WARNING: Skipping non-numeric amplificationPronePorts key '$($prop.Name)' in '$Path'." -ForegroundColor Yellow
+            }
+        }
+    }
+
+    $addedAmpApps = 0
+    if ($customJson.amplificationProneApplications) {
+        foreach ($prop in $customJson.amplificationProneApplications.PSObject.Properties) {
+            $AmplificationProneApplications[$prop.Name.ToLower()] = [string]$prop.Value
+            $addedAmpApps++
+        }
+    }
+
+    Write-Host "Loaded custom risky taxonomy from '$Path': $addedPorts port(s), $addedCleartext cleartext port(s), $addedApps application(s), $addedAmpPorts amplification port(s), $addedAmpApps amplification application(s) added/overridden." -ForegroundColor DarkGray
 }
 
 # --------------------------------------------------------------------------
@@ -252,6 +308,19 @@ function Test-ZonesEqualFast {
     # lowercased.
     param([array]$ALower, [array]$BLower)
     return (Test-ZonesCoveredFast -EarlierLower $ALower -LaterLower $BLower) -and (Test-ZonesCoveredFast -EarlierLower $BLower -LaterLower $ALower) -and (-not ($ALower -contains "any" -and -not ($BLower -contains "any"))) -and (-not ($BLower -contains "any" -and -not ($ALower -contains "any")))
+}
+
+function Test-ZonesOverlapFast {
+    # Genuine set intersection, not the containment tested by
+    # Test-ZonesCoveredFast above. Needed for the Correlation anomaly
+    # check, which looks for rules whose zones share at least one common
+    # value without one side necessarily covering the other outright.
+    param([array]$ALower, [array]$BLower)
+    if ($ALower -contains "any" -or $BLower -contains "any") { return $true }
+    foreach ($z in $ALower) {
+        if ($BLower -contains $z) { return $true }
+    }
+    return $false
 }
 
 function Test-AddressTouchesInternet {
@@ -465,6 +534,28 @@ function Invoke-DeterministicChecks {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "rule_name_action_mismatch"
                 Detail   = "Rule name suggests it allows/permits traffic, but Action is actually '$($rule.Action)'. Anyone reading the ruleset by name alone would reasonably assume this traffic is permitted when it isn't. Verify whether the name is stale (rule was toggled without renaming) or the action was set incorrectly."
+            }
+        }
+
+        # A rule name that reveals nothing about its purpose (a GUI default,
+        # a copy-paste artifact, a bare number) is a hygiene gap distinct
+        # from the temporary/POC/test signal checked further down: this
+        # isn't about a rule that LOOKS temporary, it's about one that
+        # gives a reviewer no information at all about what it controls,
+        # forcing them to reconstruct intent from the match criteria alone
+        # every time it comes up in an audit or a cleanup pass. Matched
+        # against the WHOLE trimmed name, not tokenized: these are
+        # placeholder-style names taken as a whole, not names that merely
+        # contain one of these words as part of something longer.
+        # "regola" (Italian for "rule") is included alongside the English
+        # defaults, since PAN-OS/Panorama exports and GUIs are sometimes
+        # localized.
+        $trimmedRuleName = $rule.Name.Trim()
+        $isGenericName = ($trimmedRuleName -match '(?i)^(rule|regola|policy|security\s*rule|new\s*rule|allow|deny|untitled|unnamed|default|sample|example)\s*#?\s*\d*$') -or ($trimmedRuleName -match '^\d+$')
+        if ($isGenericName) {
+            $findings += [PSCustomObject]@{
+                RuleName = $rule.Name; Severity = "Low"; Type = "generic_rule_name"
+                Detail   = "Rule name ('$($rule.Name)') does not describe what traffic it actually controls, reading like a GUI default or placeholder rather than a deliberate name. Every future review has to reconstruct intent from the match criteria alone, which slows down audits and raises the odds this rule gets misjudged during a cleanup pass. Rename to reflect source, destination, or purpose."
             }
         }
 
@@ -941,6 +1032,36 @@ function Invoke-DeterministicChecks {
                     }
                 }
             }
+
+            # Amplification/reflection: a different risk framing from the
+            # two checks just above. Those are about THIS network being
+            # compromised through a risky inbound service; this one is
+            # about THIS firewall's own server being abused to bounce large
+            # UDP responses at a spoofed third-party victim (the attacker
+            # never has to receive anything back, since it forges the
+            # victim's address as the source). UDP transport is what makes
+            # this possible in the first place, so it's checked via
+            # Get-ServiceUdpPorts rather than the transport-agnostic
+            # Get-ServicePorts used for $RiskyPorts above.
+            if ($rule.Application) {
+                foreach ($app in $rule.Application) {
+                    if ($AmplificationProneApplications.ContainsKey($app)) {
+                        $findings += [PSCustomObject]@{
+                            RuleName = $rule.Name; Severity = "High"; Type = "exposed_amplification_prone_service"
+                            Detail   = "Inbound from the internet to an amplification-prone UDP service ($($AmplificationProneApplications[$app]), App-ID '$app') toward destination address='$($rule.DstAddrRaw)'. A server answering this from the open internet can be abused as a reflector/amplifier in a DDoS attack against a third party: the attacker spoofs the victim's source address, and your server sends its (often much larger) response there instead of back to the attacker. This is a risk to others as much as to this network. Restrict the source to specific, known hosts if this is meant for legitimate reachability."
+                        }
+                    }
+                }
+            }
+            $udpPortsHere = Get-ServiceUdpPorts -ServiceTokens $rule.Service
+            foreach ($port in $udpPortsHere) {
+                if ($AmplificationPronePorts.ContainsKey($port)) {
+                    $findings += [PSCustomObject]@{
+                        RuleName = $rule.Name; Severity = "High"; Type = "exposed_amplification_prone_service"
+                        Detail   = "Inbound from the internet to an amplification-prone UDP service ($($AmplificationPronePorts[$port]), UDP port $port) toward destination address='$($rule.DstAddrRaw)'. A server answering this from the open internet can be abused as a reflector/amplifier in a DDoS attack against a third party: the attacker spoofs the victim's source address, and your server sends its (often much larger) response there instead of back to the attacker. This is a risk to others as much as to this network. Restrict the source to specific, known hosts if this is meant for legitimate reachability."
+                    }
+                }
+            }
         }
 
         # General catch-all: any rule that touches the internet on either
@@ -1185,6 +1306,7 @@ function Invoke-DeterministicChecks {
         if ($sigBuckets2.ContainsKey($ruleSig)) { $candidates2.AddRange($sigBuckets2[$ruleSig]) }
         $candidates2.Sort()
 
+        $foundCorrelationForRule = $false
         foreach ($j in $candidates2) {
             $earlier = $enabledAll[$j]
             if ($earlier.Action -eq $rule.Action) { continue }  # same-action case already handled above
@@ -1220,6 +1342,110 @@ function Invoke-DeterministicChecks {
                         RuleName = $rule.Name; Severity = "Medium"; Type = "deny_shadows_allow"
                         Detail   = "This ALLOW rule is fully covered by an earlier DENY rule ('$($earlier.Name)') with equal-or-broader scope. It can never trigger. The traffic it was meant to permit is actually still blocked by the earlier rule. Not a security exposure, but a functional bug. Whoever relies on this allow believes access exists when it doesn't."
                     }
+                }
+                break
+            }
+
+            # Correlation anomaly (Al-Shaer/Hamed taxonomy, the same one
+            # Strata Cloud Manager's Policy Analyzer calls "Correlations"):
+            # two rules with different actions whose match criteria
+            # partially overlap without either one containing the other.
+            # Not shadowing (neither rule is fully dead) and not a
+            # Generalization (that requires full containment one way,
+            # checked separately below via a dedicated backward scan this
+            # candidate pool isn't built to support) - just a genuine,
+            # order-dependent ambiguity over the traffic in the overlap.
+            # Reported only once per rule (first match) to keep report
+            # volume sane; still Low severity per Al-Shaer et al., since
+            # this is a warning to review, not a confirmed misconfiguration.
+            if (-not $foundCorrelationForRule) {
+                $laterCoversEarlier = (Test-ZonesCoveredFast -EarlierLower $ruleSrcZ -LaterLower $earlierSrcZ) -and
+                                      (Test-ZonesCoveredFast -EarlierLower $ruleDstZ -LaterLower $earlierDstZ) -and
+                                      (Test-NetworksContainFast $ruleSrc $earlierSrc) -and
+                                      (Test-NetworksContainFast $ruleDst $earlierDst) -and
+                                      (Test-ListContains $rule.Application $earlier.Application) -and
+                                      (Test-ListContains $rule.Service $earlier.Service)
+                if (-not $laterCoversEarlier) {
+                    $overlaps = (Test-ZonesOverlapFast $earlierSrcZ $ruleSrcZ) -and
+                                (Test-ZonesOverlapFast $earlierDstZ $ruleDstZ) -and
+                                (Test-NetworksOverlapFast $earlierSrc $ruleSrc) -and
+                                (Test-NetworksOverlapFast $earlierDst $ruleDst) -and
+                                (Test-ListsOverlap $earlier.Application $rule.Application) -and
+                                (Test-ListsOverlap $earlier.Service $rule.Service)
+                    if ($overlaps) {
+                        $findings += [PSCustomObject]@{
+                            RuleName = $rule.Name; Severity = "Low"; Type = "correlation_anomaly"
+                            Detail   = "This rule's match criteria partially overlap with an earlier rule ('$($earlier.Name)', action $($earlier.Action)) without either rule fully covering the other. For the traffic that matches both, the effective action depends only on which rule sits first in the rulebase, something neither rule states explicitly on its own. Review whether this overlap is intentional; if not, scope one of the two rules so they no longer share matching traffic."
+                        }
+                        $foundCorrelationForRule = $true
+                    }
+                }
+            }
+        }
+
+        # Generalization anomaly (the other half of the same Al-Shaer/Hamed
+        # pair, SCM's "Generalizations"): an EARLIER, narrower rule that is
+        # fully covered by a LATER, broader rule with a different action.
+        # This is the mirror image of the shadow check above (Earlier
+        # covers Later); here Later covers Earlier instead, which is a very
+        # different situation operationally: the earlier, narrow rule still
+        # fires and is NOT dead, it's a deliberate-looking exception carved
+        # out ahead of a broad catch-all. The anomaly is fragility, not
+        # brokenness - if the narrow rule is ever deleted (a cleanup
+        # mistake, assuming the broad rule "already covers it") or the two
+        # are reordered, the effective behavior for its traffic changes
+        # silently.
+        #
+        # This needs a genuinely different candidate set than $candidates2
+        # above: that bucketing only ever gathers EARLIER rules whose zone
+        # is "any" or matches $rule's own zone signature exactly, which is
+        # exactly backwards for this direction (a later "any"-zoned rule
+        # would never see an earlier zone-specific rule as a candidate that
+        # way). Rather than a second full O(n^2) pass, this only scans back
+        # through every earlier rule when the CURRENT rule looks broad
+        # enough to plausibly generalize something - broad zone or address
+        # is what a real catch-all rule looks like in practice - keeping
+        # the extra cost bounded by how many such broad rules exist, not by
+        # the ruleset size squared. A generalization pair that doesn't
+        # involve an obviously broad rule (e.g. two similarly-specific
+        # CIDRs where one happens to contain the other) is out of scope for
+        # this heuristic; the shadow check above already exists for the
+        # unambiguous "earlier covers later" direction regardless.
+        $ruleLooksBroadEnoughToGeneralize = ($ruleSrcZ -contains "any") -or ($ruleDstZ -contains "any") -or ($null -eq $ruleSrc) -or ($null -eq $ruleDst)
+        if ($ruleLooksBroadEnoughToGeneralize) {
+            for ($k = 0; $k -lt $i; $k++) {
+                $candidateEarlier = $enabledAll[$k]
+                if ($candidateEarlier.Action -eq $rule.Action) { continue }
+                $candSrc = $parsedSrcAddr[$candidateEarlier.Index]
+                $candDst = $parsedDstAddr[$candidateEarlier.Index]
+                $candSrcZ = $lowerSrcZone[$candidateEarlier.Index]
+                $candDstZ = $lowerDstZone[$candidateEarlier.Index]
+
+                $laterCoversEarlier2 = (Test-ZonesCoveredFast -EarlierLower $ruleSrcZ -LaterLower $candSrcZ) -and
+                                       (Test-ZonesCoveredFast -EarlierLower $ruleDstZ -LaterLower $candDstZ) -and
+                                       (Test-NetworksContainFast $ruleSrc $candSrc) -and
+                                       (Test-NetworksContainFast $ruleDst $candDst) -and
+                                       (Test-ListContains $rule.Application $candidateEarlier.Application) -and
+                                       (Test-ListContains $rule.Service $candidateEarlier.Service)
+                if (-not $laterCoversEarlier2) { continue }
+
+                # Exclude the trivial case where both rules are actually
+                # identical on every field (both directions of containment
+                # hold): that pair is a genuine full shadow, not an
+                # asymmetric generalization, and belongs to the shadow
+                # check's territory even if this candidate pool happened to
+                # find it first.
+                $earlierCoversLater2 = (Test-ZonesCoveredFast -EarlierLower $candSrcZ -LaterLower $ruleSrcZ) -and
+                                       (Test-ZonesCoveredFast -EarlierLower $candDstZ -LaterLower $ruleDstZ) -and
+                                       (Test-NetworksContainFast $candSrc $ruleSrc) -and
+                                       (Test-NetworksContainFast $candDst $ruleDst) -and
+                                       (Test-ListContains $candidateEarlier.Application $rule.Application) -and
+                                       (Test-ListContains $candidateEarlier.Service $rule.Service)
+                if ($earlierCoversLater2) { continue }
+
+                $findings += [PSCustomObject]@{
+                    RuleName = $candidateEarlier.Name; Severity = "Low"; Type = "generalization_anomaly"
+                    Detail   = "This rule is fully covered by a later, broader rule ('$($rule.Name)') that uses a different action ($($rule.Action)). Right now this rule fires first as a deliberate-looking exception ahead of that broader rule. If it is ever removed (e.g. during cleanup, on the assumption the later rule already covers it) or reordered below it, the effective behavior for its traffic changes silently, with nothing from the firewall itself flagging the change. Verify this is a known, intentional exception."
                 }
                 break
             }
@@ -1297,6 +1523,10 @@ function Add-DeterministicSuggestedFixes {
         "shadowed_rule"                 = "Remove this rule. Never matches, fully covered by an earlier rule."
         "temporary_tag_but_broad_rule"  = "Confirm with the rule owner whether still needed. If yes, narrow the scope; if no, remove."
         "temporary_tag_still_present"   = "Confirm with the rule owner whether still needed. Remove the tag or the rule if stale."
+        "generalization_anomaly"        = "Confirm this is a known, intentional exception. Document it (e.g. a rule comment or naming convention) so it survives cleanup and reordering."
+        "correlation_anomaly"           = "Review the overlapping traffic between the two rules named here. Scope one of them more narrowly, or document which one is meant to take precedence and why."
+        "exposed_amplification_prone_service" = "Restrict the source to specific, known hosts, or remove internet reachability entirely if not required for legitimate use."
+        "generic_rule_name"             = "Rename this rule to describe the traffic it actually controls (source, destination, or purpose), instead of relying on rule order to convey intent."
     }
     foreach ($f in $Findings) {
         if ($deterministicSuggestions.ContainsKey($f.Type)) {
