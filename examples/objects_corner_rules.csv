@@ -1,0 +1,37 @@
+Name,Source Zone,Source Address,Destination Zone,Destination Address,Application,Service,Action,Profile,Options,Tags,Disabled,Hit Count,Last Hit,Rule Usage
+Grp-Web-443,inside,any,dmz,G-WEB,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Obj-Web1-443-Shadowed,inside,10.10.0.0/24,dmz,WEB-1,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Lit-Web2-443-Shadowed,inside,10.10.1.0/24,dmz,10.1.1.11/32,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Obj-Web-Old-Not-Covered,inside,any,dmz,Web Server Old,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Nested-All-Srv,guest,any,dmz,G-ALL-SRV,any,tcp-8080,allow,default,Log at Session End,,no,1000,2026-09-20,used
+App-Host-In-Nested-Shadowed,guest,10.61.0.0/24,dmz,10.2.0.5/32,any,tcp-8080,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Db-Obj-In-Nested-Shadowed,guest,10.61.1.0/24,dmz,DB-1,any,tcp-8080,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Range-Src-Rule,outside,R-VPN,dmz,APP-NET,any,tcp-22,allow,none,Log at Session End,,no,1000,2026-09-20,used
+Range-Member-Shadowed,outside,10.9.0.15,dmz,10.2.0.9,any,tcp-22,allow,none,Log at Session End,,no,1000,2026-09-20,used
+Range-Group-Src,outside,G-RANGE,inside,DB-1,any,tcp-1433,allow,none,Log at Session End,,no,1000,2026-09-20,used
+Range-Group-Member-Shadowed,outside,10.9.1.50,inside,DB-1,any,tcp-1433,allow,none,Log at Session End,,no,1000,2026-09-20,used
+Fqdn-Group-Backup,inside,LAN-SUPERNET,outside,G-BACKUP,any,tcp-873,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Backup-IP-Only-Shadowed,inside,10.20.0.0/16,outside,BACKUP-IP,any,tcp-873,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Backup-Fqdn-Only,inside,10.21.0.0/16,outside,BACKUP-FQDN,any,tcp-873,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Wildcard-Printers,inside,WILD-PRINTERS,dmz,WEB-1,any,tcp-9100,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Deny-Guest-Grp,guest,G-GUEST,inside,any,any,any,deny,none,Log at Session End,,no,1000,2026-09-20,used
+Guest-Host-Allow-Dead,guest,10.60.5.5,inside,DB-1,any,tcp-1433,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Neg-Guest-Grp-Allow,inside,[Negate] G-GUEST,dmz,G-WEB,any,tcp-8443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Neg-Obj-Admin-Deny,mgmt,[Negate] ADMIN-NET,mgmt,SWIFT-GW,any,tcp-22,deny,none,Log at Session End,,no,1000,2026-09-20,used
+Partners-Inbound-RDP,outside,G-PARTNERS,dmz,WEB-2,ms-rdp,application-default,allow,none,Log at Session End,,no,1000,2026-09-20,used
+Partner-A-Only-Shadowed,outside,PARTNER-A,dmz,WEB-2,ms-rdp,application-default,allow,none,Log at Session End,,no,1000,2026-09-20,used
+Out-To-Partners-Public,inside,APP-NET,dmz,G-PARTNERS,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Dns-To-Resolver-Grp,inside,LAN-SUPERNET,outside,G-RESOLVERS,any,udp-53,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Dns-App-To-Resolver-Obj,inside,LAN-SUPERNET,outside,DNS-CF,dns,application-default,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Any-Net-Object-Allow,inside,ANY-NET,dmz,ANY-NET,any,any,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Deep-Nested-Host,inside,G-L1,dmz,WEB-1,any,tcp-5000,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Deep-Host-Literal-Shadowed,inside,10.7.7.7,dmz,WEB-1,any,tcp-5000,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Big-Group-Src,inside,G-BIG,dmz,APP-NET,any,tcp-6000,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Big-Literal-List,inside,HOST-01;HOST-02;HOST-03;HOST-04;HOST-05;HOST-06;HOST-07;HOST-08;HOST-09;HOST-10;HOST-11;HOST-12;HOST-13;HOST-14;HOST-15;HOST-16;HOST-17;HOST-18;HOST-19;HOST-20;HOST-21;HOST-22;HOST-23;HOST-24;HOST-25;HOST-26;HOST-27;HOST-28;HOST-29;HOST-30,dmz,APP-NET,any,tcp-6001,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Grp-Web-Copy-Duplicate,inside,any,dmz,G-WEB-COPY,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Grp-Web-Members-Listed-Dup,inside,any,dmz,WEB-1;WEB-2,any,tcp-443,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Mixed-Undefined-Member,inside,10.30.0.0/24,dmz,G-MIXED-UNDEF,any,tcp-7000,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Mixed-Obj-And-Literal,inside,APP-NET;10.31.0.0/24,dmz,G-WEB;10.1.1.99,any,tcp-7001,allow,default,Log at Session End,,no,1000,2026-09-20,used
+Swift-Egress-Obj,swift,SWIFT-GW,outside,any,any,tcp-443,allow,default,Log at Session End,swift,no,1000,2026-09-20,used
+Grp-Web-Deny-After-Allow,inside,10.10.0.0/24,dmz,G-WEB,any,tcp-443,deny,none,Log at Session End,,no,1000,2026-09-20,used
+Cleanup,any,any,any,any,any,any,deny,none,Log at Session End,,no,1000,2026-09-20,used

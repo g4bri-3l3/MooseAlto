@@ -1,0 +1,34 @@
+Logical system: root-logical-system
+Index   From zone        To zone           Name                                Policy count  Action
+1       outside          dmz               Allow-DMZ-Subnet-Broad              600           Permit
+2       outside          dmz               Deny-Compromised-Host-DMZ           0             Deny
+3       outside          dmz               Allow-RDP-From-Internet             320           Permit
+4       outside          dmz               Allow-SSH-Admin-From-Internet       15            Permit
+5       outside          mgmt              Allow-Telnet-Legacy-Switch          3             Permit
+6       outside          dmz               Allow-FTP-Legacy-Transfer           8             Permit
+7       outside          inside            Allow-AnyDesk-Remote-Support        88            Permit
+8       outside          inside            Allow-TeamViewer-Vendor-Access      42            Permit
+9       outside          dmz               Allow-Wide-Open-DMZ-Inbound         410           Permit
+10      inside           swift             Allow-Corp-To-SWIFT-Zone            55            Permit
+11      pos              cde               Allow-POS-To-CDE-Broad              12            Permit
+12      inside           server            Allow-Broad-Server-Subnet           900           Permit
+13      inside           server            Allow-Specific-DB-Server            0             Permit
+14      inside           outside           Allow-Duplicate-Web-Rule-A          60            Permit
+15      inside           outside           Allow-Duplicate-Web-Rule-B          0             Permit
+16      inside           outside           Allow-DoT-Explicit-Port             50            Permit
+17      inside           outside           Allow-DoH-Explicit-App              75            Permit
+18      inside           outside           Allow-Plain-DNS-Google-Cloudflare   300           Permit
+19      inside           outside           Allow-Plain-DNS-Unrestricted        60            Permit
+20      dmz              outside           Allow-Negated-RFC1918-Full          180           Permit
+21      outside          inside            Allow-Temp-Vendor-POC               9             Permit
+22      server           outside           Test_for_POC                        15            Permit
+23      outside          inside            Old-Legacy-VPN-Rule                 0             Permit
+24      inside           server            Allow-Workstation-To-FileServer-SMB 95            Permit
+25      inside           server            Allow-Broad-Internal-Lateral        410           Permit
+26      inside           dmz               Allow-Port-Only-No-AppID            140           Permit
+27      inside           dmz               Allow-Zero-Hit-Old-Rule             0             Permit
+28      inside           dmz               Allow-Stale-OneOff-Grant            25            Permit
+29      inside           outside           Allow-Corp-To-Salesforce            520           Permit
+30      Any              Any               Allow-Negated-Single-Range          4             Permit
+
+Number of policy: 30

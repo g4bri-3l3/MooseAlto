@@ -1,0 +1,243 @@
+## Last commit: 2026-09-28 00:00:00 UTC by moosealto-generator
+set version 22.4R3
+set system host-name srx-demo
+set interfaces ge-0/0/0 unit 0 family inet address 203.0.113.2/29
+set routing-options static route 0.0.0.0/0 next-hop 203.0.113.1
+set security zones security-zone outside interfaces ge-0/0/0.0
+set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.2/32
+set security zones security-zone dmz interfaces ge-0/0/1.0
+set interfaces ge-0/0/2 unit 0 family inet address 192.0.2.3/32
+set security zones security-zone mgmt interfaces ge-0/0/2.0
+set interfaces ge-0/0/3 unit 0 family inet address 192.0.2.4/32
+set security zones security-zone inside interfaces ge-0/0/3.0
+set interfaces ge-0/0/4 unit 0 family inet address 192.0.2.5/32
+set security zones security-zone swift interfaces ge-0/0/4.0
+set interfaces ge-0/0/5 unit 0 family inet address 192.0.2.6/32
+set security zones security-zone pos interfaces ge-0/0/5.0
+set interfaces ge-0/0/6 unit 0 family inet address 192.0.2.7/32
+set security zones security-zone cde interfaces ge-0/0/6.0
+set interfaces ge-0/0/7 unit 0 family inet address 192.0.2.8/32
+set security zones security-zone server interfaces ge-0/0/7.0
+set security address-book global address n_10.45.0.0_16 10.45.0.0/16
+set security address-book global address h_10.45.10.99 10.45.10.99/32
+set security address-book global address h_10.40.10.5 10.40.10.5/32
+set security address-book global address h_10.40.10.10 10.40.10.10/32
+set security address-book global address h_10.40.90.2 10.40.90.2/32
+set security address-book global address h_10.40.60.5 10.40.60.5/32
+set security address-book global address n_10.10.5.0_24 10.10.5.0/24
+set security address-book global address n_10.50.0.0_16 10.50.0.0/16
+set security address-book global address h_10.50.5.10 10.50.5.10/32
+set security address-book global address h_10.60.1.10 10.60.1.10/32
+set security address-book global address h_203.0.113.80 203.0.113.80/32
+set security address-book global address h_8.8.8.8 8.8.8.8/32
+set security address-book global address h_1.1.1.1 1.1.1.1/32
+set security address-book global address n_198.51.100.0_24 198.51.100.0/24
+set security address-book global address r_10.0.0.0-10.255.255.255 range-address 10.0.0.0 to 10.255.255.255
+set security address-book global address r_172.16.0.0-172.31.255.255 range-address 172.16.0.0 to 172.31.255.255
+set security address-book global address r_192.168.0.0-192.168.255.255 range-address 192.168.0.0 to 192.168.255.255
+set security address-book global address n_10.200.0.0_16 10.200.0.0/16
+set security address-book global address n_62.49.10.92_28 62.49.10.92/28
+set security address-book global address n_10.10.1.0_24 10.10.1.0/24
+set security address-book global address n_10.10.9.0_24 10.10.9.0/24
+set security address-book global address h_10.40.30.5 10.40.30.5/32
+set security address-book global address h_10.40.40.5 10.40.40.5/32
+set security address-book global address h_10.10.9.10 10.10.9.10/32
+set security address-book global address h_10.40.50.5 10.40.50.5/32
+set security address-book global address h_203.0.113.40 203.0.113.40/32
+set applications application tcp-23 protocol tcp
+set applications application tcp-23 destination-port 23
+set applications application tcp-853 protocol tcp
+set applications application tcp-853 destination-port 853
+set applications application udp-53 protocol udp
+set applications application udp-53 destination-port 53
+set applications application tcp-8443 protocol tcp
+set applications application tcp-8443 destination-port 8443
+set security policies from-zone outside to-zone dmz policy Allow-DMZ-Subnet-Broad match source-address any
+set security policies from-zone outside to-zone dmz policy Allow-DMZ-Subnet-Broad match destination-address n_10.45.0.0_16
+set security policies from-zone outside to-zone dmz policy Allow-DMZ-Subnet-Broad match application any
+set security policies from-zone outside to-zone dmz policy Allow-DMZ-Subnet-Broad then permit
+set security policies from-zone outside to-zone dmz policy Allow-DMZ-Subnet-Broad then log session-close
+set security policies from-zone outside to-zone dmz policy Allow-DMZ-Subnet-Broad description legacy-open
+set security policies from-zone outside to-zone dmz policy Deny-Compromised-Host-DMZ match source-address any
+set security policies from-zone outside to-zone dmz policy Deny-Compromised-Host-DMZ match destination-address h_10.45.10.99
+set security policies from-zone outside to-zone dmz policy Deny-Compromised-Host-DMZ match application any
+set security policies from-zone outside to-zone dmz policy Deny-Compromised-Host-DMZ then deny
+set security policies from-zone outside to-zone dmz policy Deny-Compromised-Host-DMZ then log session-close
+set security policies from-zone outside to-zone dmz policy Deny-Compromised-Host-DMZ description incident-response
+set security policies from-zone outside to-zone dmz policy Allow-RDP-From-Internet match source-address any
+set security policies from-zone outside to-zone dmz policy Allow-RDP-From-Internet match destination-address h_10.40.10.5
+set security policies from-zone outside to-zone dmz policy Allow-RDP-From-Internet match dynamic-application junos:RDP
+set security policies from-zone outside to-zone dmz policy Allow-RDP-From-Internet match application junos-defaults
+set security policies from-zone outside to-zone dmz policy Allow-RDP-From-Internet then permit
+set security policies from-zone outside to-zone dmz policy Allow-RDP-From-Internet then log session-close
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet match source-address any
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet match destination-address h_10.40.10.10
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet match dynamic-application junos:SSH
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet match application junos-defaults
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet then permit
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet then log session-close
+set security policies from-zone outside to-zone dmz policy Allow-SSH-Admin-From-Internet description admin
+set security policies from-zone outside to-zone mgmt policy Allow-Telnet-Legacy-Switch match source-address any
+set security policies from-zone outside to-zone mgmt policy Allow-Telnet-Legacy-Switch match destination-address h_10.40.90.2
+set security policies from-zone outside to-zone mgmt policy Allow-Telnet-Legacy-Switch match application tcp-23
+set security policies from-zone outside to-zone mgmt policy Allow-Telnet-Legacy-Switch then permit
+set security policies from-zone outside to-zone mgmt policy Allow-Telnet-Legacy-Switch then log session-close
+set security policies from-zone outside to-zone mgmt policy Allow-Telnet-Legacy-Switch description legacy
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer match source-address any
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer match destination-address h_10.40.60.5
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer match dynamic-application junos:FTP
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer match application junos-defaults
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer then permit
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer then log session-close
+set security policies from-zone outside to-zone dmz policy Allow-FTP-Legacy-Transfer description legacy
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support match source-address any
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support match destination-address n_10.10.5.0_24
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support match dynamic-application junos:ANYDESK
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support match application junos-defaults
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support then permit
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support then log session-close
+set security policies from-zone outside to-zone inside policy Allow-AnyDesk-Remote-Support description remote-support
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access match source-address any
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access match destination-address n_10.10.5.0_24
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access match dynamic-application junos:TEAMVIEWER
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access match application junos-defaults
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access then permit
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access then log session-close
+set security policies from-zone outside to-zone inside policy Allow-TeamViewer-Vendor-Access description vendor
+set security policies from-zone outside to-zone dmz policy Allow-Wide-Open-DMZ-Inbound match source-address any
+set security policies from-zone outside to-zone dmz policy Allow-Wide-Open-DMZ-Inbound match destination-address any
+set security policies from-zone outside to-zone dmz policy Allow-Wide-Open-DMZ-Inbound match application any
+set security policies from-zone outside to-zone dmz policy Allow-Wide-Open-DMZ-Inbound then permit
+set security policies from-zone outside to-zone dmz policy Allow-Wide-Open-DMZ-Inbound then log session-close
+set security policies from-zone outside to-zone dmz policy Allow-Wide-Open-DMZ-Inbound description legacy-open
+set security policies from-zone inside to-zone swift policy Allow-Corp-To-SWIFT-Zone match source-address any
+set security policies from-zone inside to-zone swift policy Allow-Corp-To-SWIFT-Zone match destination-address any
+set security policies from-zone inside to-zone swift policy Allow-Corp-To-SWIFT-Zone match application any
+set security policies from-zone inside to-zone swift policy Allow-Corp-To-SWIFT-Zone then permit
+set security policies from-zone inside to-zone swift policy Allow-Corp-To-SWIFT-Zone then log session-close
+set security policies from-zone pos to-zone cde policy Allow-POS-To-CDE-Broad match source-address any
+set security policies from-zone pos to-zone cde policy Allow-POS-To-CDE-Broad match destination-address any
+set security policies from-zone pos to-zone cde policy Allow-POS-To-CDE-Broad match application any
+set security policies from-zone pos to-zone cde policy Allow-POS-To-CDE-Broad then permit
+set security policies from-zone pos to-zone cde policy Allow-POS-To-CDE-Broad then log session-close
+set security policies from-zone inside to-zone server policy Allow-Broad-Server-Subnet match source-address n_10.50.0.0_16
+set security policies from-zone inside to-zone server policy Allow-Broad-Server-Subnet match destination-address any
+set security policies from-zone inside to-zone server policy Allow-Broad-Server-Subnet match application any
+set security policies from-zone inside to-zone server policy Allow-Broad-Server-Subnet then permit application-services utm-policy strict
+set security policies from-zone inside to-zone server policy Allow-Broad-Server-Subnet then log session-close
+set security policies from-zone inside to-zone server policy Allow-Specific-DB-Server match source-address h_10.50.5.10
+set security policies from-zone inside to-zone server policy Allow-Specific-DB-Server match destination-address h_10.60.1.10
+set security policies from-zone inside to-zone server policy Allow-Specific-DB-Server match dynamic-application junos:MYSQL
+set security policies from-zone inside to-zone server policy Allow-Specific-DB-Server match application junos-defaults
+set security policies from-zone inside to-zone server policy Allow-Specific-DB-Server then permit application-services utm-policy strict
+set security policies from-zone inside to-zone server policy Allow-Specific-DB-Server then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-A match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-A match destination-address h_203.0.113.80
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-A match dynamic-application junos:SSL
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-A match application junos-defaults
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-A then permit application-services utm-policy strict
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-A then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-B match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-B match destination-address h_203.0.113.80
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-B match dynamic-application junos:SSL
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-B match application junos-defaults
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-B then permit application-services utm-policy strict
+set security policies from-zone inside to-zone outside policy Allow-Duplicate-Web-Rule-B then log session-close
+set security policies from-zone inside to-zone outside policy Allow-DoT-Explicit-Port match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-DoT-Explicit-Port match destination-address any
+set security policies from-zone inside to-zone outside policy Allow-DoT-Explicit-Port match application tcp-853
+set security policies from-zone inside to-zone outside policy Allow-DoT-Explicit-Port then permit
+set security policies from-zone inside to-zone outside policy Allow-DoT-Explicit-Port then log session-close
+set security policies from-zone inside to-zone outside policy Allow-DoH-Explicit-App match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-DoH-Explicit-App match destination-address h_8.8.8.8
+set security policies from-zone inside to-zone outside policy Allow-DoH-Explicit-App match dynamic-application junos:DOH
+set security policies from-zone inside to-zone outside policy Allow-DoH-Explicit-App match application junos-defaults
+set security policies from-zone inside to-zone outside policy Allow-DoH-Explicit-App then permit
+set security policies from-zone inside to-zone outside policy Allow-DoH-Explicit-App then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare match destination-address h_8.8.8.8
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare match destination-address h_1.1.1.1
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare match dynamic-application junos:DNS
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare match application udp-53
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare then permit
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Google-Cloudflare then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted match destination-address any
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted match dynamic-application junos:DNS
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted match application udp-53
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted then permit
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Plain-DNS-Unrestricted description legacy
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match source-address r_10.0.0.0-10.255.255.255
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match source-address r_172.16.0.0-172.31.255.255
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match source-address r_192.168.0.0-192.168.255.255
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match destination-address any
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match source-address-excluded
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match dynamic-application junos:HTTP
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full match application junos-defaults
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full then permit application-services utm-policy strict
+set security policies from-zone dmz to-zone outside policy Allow-Negated-RFC1918-Full then log session-close
+set security policies from-zone outside to-zone inside policy Allow-Temp-Vendor-POC match source-address any
+set security policies from-zone outside to-zone inside policy Allow-Temp-Vendor-POC match destination-address any
+set security policies from-zone outside to-zone inside policy Allow-Temp-Vendor-POC match application any
+set security policies from-zone outside to-zone inside policy Allow-Temp-Vendor-POC then permit
+set security policies from-zone outside to-zone inside policy Allow-Temp-Vendor-POC then log session-close
+set security policies from-zone outside to-zone inside policy Allow-Temp-Vendor-POC description temp-poc
+set security policies from-zone server to-zone outside policy Test_for_POC match source-address n_10.200.0.0_16
+set security policies from-zone server to-zone outside policy Test_for_POC match destination-address n_62.49.10.92_28
+set security policies from-zone server to-zone outside policy Test_for_POC match dynamic-application junos:HTTPS
+set security policies from-zone server to-zone outside policy Test_for_POC match dynamic-application junos:SSH
+set security policies from-zone server to-zone outside policy Test_for_POC match application any
+set security policies from-zone server to-zone outside policy Test_for_POC then permit
+set security policies from-zone server to-zone outside policy Test_for_POC then log session-close
+set security policies from-zone server to-zone outside policy Test_for_POC description poc
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule match source-address any
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule match destination-address n_10.10.1.0_24
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule match dynamic-application junos:IPSEC
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule match application junos-defaults
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule then permit
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule then log session-close
+set security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule description legacy
+set security policies from-zone inside to-zone server policy Allow-Workstation-To-FileServer-SMB match source-address n_10.10.9.0_24
+set security policies from-zone inside to-zone server policy Allow-Workstation-To-FileServer-SMB match destination-address any
+set security policies from-zone inside to-zone server policy Allow-Workstation-To-FileServer-SMB match dynamic-application junos:SMB
+set security policies from-zone inside to-zone server policy Allow-Workstation-To-FileServer-SMB match application junos-defaults
+set security policies from-zone inside to-zone server policy Allow-Workstation-To-FileServer-SMB then permit
+set security policies from-zone inside to-zone server policy Allow-Workstation-To-FileServer-SMB then log session-close
+set security policies from-zone inside to-zone server policy Allow-Broad-Internal-Lateral match source-address any
+set security policies from-zone inside to-zone server policy Allow-Broad-Internal-Lateral match destination-address any
+set security policies from-zone inside to-zone server policy Allow-Broad-Internal-Lateral match application any
+set security policies from-zone inside to-zone server policy Allow-Broad-Internal-Lateral then permit
+set security policies from-zone inside to-zone server policy Allow-Broad-Internal-Lateral then log session-close
+set security policies from-zone inside to-zone dmz policy Allow-Port-Only-No-AppID match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone dmz policy Allow-Port-Only-No-AppID match destination-address h_10.40.30.5
+set security policies from-zone inside to-zone dmz policy Allow-Port-Only-No-AppID match application tcp-8443
+set security policies from-zone inside to-zone dmz policy Allow-Port-Only-No-AppID then permit application-services utm-policy strict
+set security policies from-zone inside to-zone dmz policy Allow-Port-Only-No-AppID then log session-close
+set security policies from-zone inside to-zone dmz policy Allow-Zero-Hit-Old-Rule match source-address n_10.10.9.0_24
+set security policies from-zone inside to-zone dmz policy Allow-Zero-Hit-Old-Rule match destination-address h_10.40.40.5
+set security policies from-zone inside to-zone dmz policy Allow-Zero-Hit-Old-Rule match dynamic-application junos:HTTP
+set security policies from-zone inside to-zone dmz policy Allow-Zero-Hit-Old-Rule match application junos-defaults
+set security policies from-zone inside to-zone dmz policy Allow-Zero-Hit-Old-Rule then permit application-services utm-policy strict
+set security policies from-zone inside to-zone dmz policy Allow-Zero-Hit-Old-Rule then log session-close
+set security policies from-zone inside to-zone dmz policy Allow-Stale-OneOff-Grant match source-address h_10.10.9.10
+set security policies from-zone inside to-zone dmz policy Allow-Stale-OneOff-Grant match destination-address h_10.40.50.5
+set security policies from-zone inside to-zone dmz policy Allow-Stale-OneOff-Grant match dynamic-application junos:SSL
+set security policies from-zone inside to-zone dmz policy Allow-Stale-OneOff-Grant match application junos-defaults
+set security policies from-zone inside to-zone dmz policy Allow-Stale-OneOff-Grant then permit application-services utm-policy strict
+set security policies from-zone inside to-zone dmz policy Allow-Stale-OneOff-Grant then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce match source-address n_10.10.5.0_24
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce match destination-address h_203.0.113.40
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce match dynamic-application junos:SSL
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce match application junos-defaults
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce then permit application-services utm-policy strict
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce then log session-close
+set security policies from-zone inside to-zone outside policy Allow-Corp-To-Salesforce description saas
+set security policies global policy Allow-Negated-Single-Range match source-address n_198.51.100.0_24
+set security policies global policy Allow-Negated-Single-Range match destination-address any
+set security policies global policy Allow-Negated-Single-Range match source-address-excluded
+set security policies global policy Allow-Negated-Single-Range match dynamic-application junos:ANYDESK
+set security policies global policy Allow-Negated-Single-Range match application junos-defaults
+set security policies global policy Allow-Negated-Single-Range then permit
+set security policies global policy Allow-Negated-Single-Range then log session-close
+deactivate security policies from-zone outside to-zone inside policy Old-Legacy-VPN-Rule

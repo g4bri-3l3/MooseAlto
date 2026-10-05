@@ -1,0 +1,313 @@
+{
+  "http_method": "GET",
+  "results": [
+    {
+      "policyid": 1,
+      "active_sessions": 0,
+      "bytes": 888000,
+      "packets": 1800,
+      "hit_count": 600,
+      "session_count": 600,
+      "last_used": 1786924800,
+      "first_used": 1784332800
+    },
+    {
+      "policyid": 2,
+      "active_sessions": 0,
+      "bytes": 0,
+      "packets": 0,
+      "hit_count": 0,
+      "session_count": 0,
+      "last_used": 0,
+      "first_used": 0
+    },
+    {
+      "policyid": 3,
+      "active_sessions": 0,
+      "bytes": 473600,
+      "packets": 960,
+      "hit_count": 320,
+      "session_count": 320,
+      "last_used": 1786838400,
+      "first_used": 1784246400
+    },
+    {
+      "policyid": 4,
+      "active_sessions": 0,
+      "bytes": 22200,
+      "packets": 45,
+      "hit_count": 15,
+      "session_count": 15,
+      "last_used": 1730505600,
+      "first_used": 1727913600
+    },
+    {
+      "policyid": 5,
+      "active_sessions": 0,
+      "bytes": 4440,
+      "packets": 9,
+      "hit_count": 3,
+      "session_count": 3,
+      "last_used": 1685577600,
+      "first_used": 1682985600
+    },
+    {
+      "policyid": 6,
+      "active_sessions": 0,
+      "bytes": 11840,
+      "packets": 24,
+      "hit_count": 8,
+      "session_count": 8,
+      "last_used": 1694649600,
+      "first_used": 1692057600
+    },
+    {
+      "policyid": 7,
+      "active_sessions": 0,
+      "bytes": 130240,
+      "packets": 264,
+      "hit_count": 88,
+      "session_count": 88,
+      "last_used": 1786320000,
+      "first_used": 1783728000
+    },
+    {
+      "policyid": 8,
+      "active_sessions": 0,
+      "bytes": 62160,
+      "packets": 126,
+      "hit_count": 42,
+      "session_count": 42,
+      "last_used": 1784505600,
+      "first_used": 1781913600
+    },
+    {
+      "policyid": 9,
+      "active_sessions": 0,
+      "bytes": 606800,
+      "packets": 1230,
+      "hit_count": 410,
+      "session_count": 410,
+      "last_used": 1786924800,
+      "first_used": 1784332800
+    },
+    {
+      "policyid": 10,
+      "active_sessions": 0,
+      "bytes": 81400,
+      "packets": 165,
+      "hit_count": 55,
+      "session_count": 55,
+      "last_used": 1785542400,
+      "first_used": 1782950400
+    },
+    {
+      "policyid": 11,
+      "active_sessions": 0,
+      "bytes": 17760,
+      "packets": 36,
+      "hit_count": 12,
+      "session_count": 12,
+      "last_used": 1736899200,
+      "first_used": 1734307200
+    },
+    {
+      "policyid": 12,
+      "active_sessions": 0,
+      "bytes": 1332000,
+      "packets": 2700,
+      "hit_count": 900,
+      "session_count": 900,
+      "last_used": 1786924800,
+      "first_used": 1784332800
+    },
+    {
+      "policyid": 13,
+      "active_sessions": 0,
+      "bytes": 0,
+      "packets": 0,
+      "hit_count": 0,
+      "session_count": 0,
+      "last_used": 0,
+      "first_used": 0
+    },
+    {
+      "policyid": 14,
+      "active_sessions": 0,
+      "bytes": 88800,
+      "packets": 180,
+      "hit_count": 60,
+      "session_count": 60,
+      "last_used": 1786320000,
+      "first_used": 1783728000
+    },
+    {
+      "policyid": 15,
+      "active_sessions": 0,
+      "bytes": 0,
+      "packets": 0,
+      "hit_count": 0,
+      "session_count": 0,
+      "last_used": 0,
+      "first_used": 0
+    },
+    {
+      "policyid": 16,
+      "active_sessions": 0,
+      "bytes": 74000,
+      "packets": 150,
+      "hit_count": 50,
+      "session_count": 50,
+      "last_used": 1786406400,
+      "first_used": 1783814400
+    },
+    {
+      "policyid": 17,
+      "active_sessions": 0,
+      "bytes": 111000,
+      "packets": 225,
+      "hit_count": 75,
+      "session_count": 75,
+      "last_used": 1786665600,
+      "first_used": 1784073600
+    },
+    {
+      "policyid": 18,
+      "active_sessions": 0,
+      "bytes": 444000,
+      "packets": 900,
+      "hit_count": 300,
+      "session_count": 300,
+      "last_used": 1786924800,
+      "first_used": 1784332800
+    },
+    {
+      "policyid": 19,
+      "active_sessions": 0,
+      "bytes": 88800,
+      "packets": 180,
+      "hit_count": 60,
+      "session_count": 60,
+      "last_used": 1772323200,
+      "first_used": 1769731200
+    },
+    {
+      "policyid": 20,
+      "active_sessions": 0,
+      "bytes": 5920,
+      "packets": 12,
+      "hit_count": 4,
+      "session_count": 4,
+      "last_used": 1707523200,
+      "first_used": 1704931200
+    },
+    {
+      "policyid": 21,
+      "active_sessions": 0,
+      "bytes": 266400,
+      "packets": 540,
+      "hit_count": 180,
+      "session_count": 180,
+      "last_used": 1786838400,
+      "first_used": 1784246400
+    },
+    {
+      "policyid": 22,
+      "active_sessions": 0,
+      "bytes": 13320,
+      "packets": 27,
+      "hit_count": 9,
+      "session_count": 9,
+      "last_used": 1757030400,
+      "first_used": 1754438400
+    },
+    {
+      "policyid": 23,
+      "active_sessions": 0,
+      "bytes": 22200,
+      "packets": 45,
+      "hit_count": 15,
+      "session_count": 15,
+      "last_used": 1782864000,
+      "first_used": 1780272000
+    },
+    {
+      "policyid": 24,
+      "active_sessions": 0,
+      "bytes": 0,
+      "packets": 0,
+      "hit_count": 0,
+      "session_count": 0,
+      "last_used": 0,
+      "first_used": 0
+    },
+    {
+      "policyid": 25,
+      "active_sessions": 0,
+      "bytes": 140600,
+      "packets": 285,
+      "hit_count": 95,
+      "session_count": 95,
+      "last_used": 1786492800,
+      "first_used": 1783900800
+    },
+    {
+      "policyid": 26,
+      "active_sessions": 0,
+      "bytes": 606800,
+      "packets": 1230,
+      "hit_count": 410,
+      "session_count": 410,
+      "last_used": 1786752000,
+      "first_used": 1784160000
+    },
+    {
+      "policyid": 27,
+      "active_sessions": 0,
+      "bytes": 207200,
+      "packets": 420,
+      "hit_count": 140,
+      "session_count": 140,
+      "last_used": 1786924800,
+      "first_used": 1784332800
+    },
+    {
+      "policyid": 28,
+      "active_sessions": 0,
+      "bytes": 0,
+      "packets": 0,
+      "hit_count": 0,
+      "session_count": 0,
+      "last_used": 0,
+      "first_used": 0
+    },
+    {
+      "policyid": 29,
+      "active_sessions": 0,
+      "bytes": 37000,
+      "packets": 75,
+      "hit_count": 25,
+      "session_count": 25,
+      "last_used": 1716163200,
+      "first_used": 1713571200
+    },
+    {
+      "policyid": 30,
+      "active_sessions": 0,
+      "bytes": 769600,
+      "packets": 1560,
+      "hit_count": 520,
+      "session_count": 520,
+      "last_used": 1786924800,
+      "first_used": 1784332800
+    }
+  ],
+  "vdom": "root",
+  "path": "firewall",
+  "name": "security-policy",
+  "action": "select",
+  "status": "success",
+  "serial": "FGVM00000000000",
+  "version": "v7.4.4",
+  "build": 2662
+}
