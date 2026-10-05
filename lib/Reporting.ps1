@@ -2,23 +2,83 @@
 # Report rendering (Markdown/HTML) and the optional Gemini AI summary
 # --------------------------------------------------------------------------
 
+# The same patterns mask what goes to Gemini and then check the final
+# request, so the check looks for exactly what should be gone. They're
+# greedy on purpose: masking a version number costs nothing, leaking an
+# address is the one thing that can't happen.
+#  - dotted IPv4, also inside names and ranges ("Allow-10.1.1.1")
+#  - IPv4 with "_" or "-" between octets ("Host_10_1_1_1")
+#  - IPv6, full or with "::"
+$script:IpMaskPatterns = @(
+    @{ Name = 'ipv4'; Regex = [regex]'(?<!\d)\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?(?!\d)' },
+    @{ Name = 'ipv4-sep'; Regex = [regex]'(?<!\d)(\d{1,3})([_-])(\d{1,3})\2(\d{1,3})\2(\d{1,3})(?!\d)' },
+    @{ Name = 'ipv6'; Regex = [regex]'(?i)(?<![0-9a-f:])(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?)(?:/\d{1,3})?(?![0-9a-f:])' }
+)
+
+function Test-IpMaskCandidate {
+    # Filters regex hits that are not addresses: separator form octets above
+    # 255 (dates, port lists), a bare "::" with no hex group.
+    param([string]$PatternName, [System.Text.RegularExpressions.Match]$Match)
+    switch ($PatternName) {
+        'ipv4-sep' {
+            foreach ($g in 1, 3, 4, 5) { if ([int]$Match.Groups[$g].Value -gt 255) { return $false } }
+            return $true
+        }
+        'ipv6' { return ($Match.Value -match '(?i)[0-9a-f]') }
+    }
+    return $true
+}
+
 function Protect-IPAddresses {
+    # Each address becomes IP-MASKED-N, the same N all run long ($Map is
+    # shared). Whole matches via regex: a plain string replace turned
+    # 10.1.1.10/24 into "IP-MASKED-10/24" once 10.1.1.1 was masked.
     param(
-        [Parameter(Mandatory = $true)][string]$Text,
+        [AllowEmptyString()][AllowNull()][string]$Text,
         [Parameter(Mandatory = $true)][System.Collections.Hashtable]$Map
     )
-    $pattern = '(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?'
-    $found = [regex]::Matches($Text, $pattern) | ForEach-Object { $_.Value } | Select-Object -Unique
-    foreach ($ip in $found) {
-        if (-not $Map.ContainsKey($ip)) {
-            $Map[$ip] = "IP-MASKED-$($Map.Count + 1)"
+    if (-not $Text) { return $Text }
+    foreach ($p in $script:IpMaskPatterns) {
+        $name = $p.Name
+        $evaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+            param($m)
+            if (-not (Test-IpMaskCandidate -PatternName $name -Match $m)) { return $m.Value }
+            # 10_1_2_3 and 10.1.2.3 are the same address: same placeholder.
+            $ip = if ($name -eq 'ipv4-sep') { ($m.Groups[1].Value, $m.Groups[3].Value, $m.Groups[4].Value, $m.Groups[5].Value) -join '.' } else { $m.Value }
+            if (-not $Map.ContainsKey($ip)) { $Map[$ip] = "IP-MASKED-$($Map.Count + 1)" }
+            return $Map[$ip]
+        }.GetNewClosure()
+        $Text = $p.Regex.Replace($Text, $evaluator)
+    }
+    return $Text
+}
+
+function Find-IpAddressLeaks {
+    # Every IP address still present in a text, by the same patterns the
+    # masker uses. Empty result = clean.
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $found = @()
+    if (-not $Text) { return $found }
+    foreach ($p in $script:IpMaskPatterns) {
+        foreach ($m in $p.Regex.Matches($Text)) {
+            if (Test-IpMaskCandidate -PatternName $p.Name -Match $m) { $found += $m.Value }
         }
     }
-    $result = $Text
-    foreach ($ip in $found) {
-        $result = $result -replace [regex]::Escape($ip), $Map[$ip]
+    return @($found | Select-Object -Unique)
+}
+
+function Test-GeminiPayloadClean {
+    # Last look at the exact request. If a new field ever skips the masking,
+    # nothing gets sent.
+    param([string[]]$Texts)
+    $leaks = @()
+    foreach ($t in $Texts) { $leaks += Find-IpAddressLeaks -Text $t }
+    $leaks = @($leaks | Select-Object -Unique)
+    if ($leaks.Count -gt 0) {
+        Write-Host "ERROR: the request to Gemini still contains $($leaks.Count) IP address(es) after masking (e.g. $(($leaks | Select-Object -First 3) -join ', ')). Nothing was sent. This is a MooseAlto bug: please report it." -ForegroundColor Red
+        return $false
     }
-    return $result
+    return $true
 }
 
 # --------------------------------------------------------------------------
@@ -29,13 +89,8 @@ $SeverityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3 }
 
 
 function Get-DisplayAddress {
-    # Shows the resolved IP/CIDR alongside the raw object/group name when
-    # -AddressObjectsCsv/-AddressGroupsCsv resolution actually changed
-    # something, so a reader sees what a name like "Rete1" or "h-10.5.5.5"
-    # actually means without needing to cross-reference the objects file
-    # separately. Left as just the raw value when resolution didn't apply
-    # (no objects file given, or the token was already a plain IP/CIDR) -
-    # showing "10.5.5.5/32 (10.5.5.5/32)" would be pure noise.
+    # "Name (10.0.0.0/8)" when resolving changed something, else just the
+    # raw value.
     param([string]$Raw, [array]$Resolved)
     $resolvedText = if ($Resolved) { ($Resolved -join ";") } else { "" }
     if (-not $resolvedText) { return $Raw }
@@ -44,17 +99,8 @@ function Get-DisplayAddress {
 }
 
 function Get-SvgPieChart {
-    # Dependency-free donut chart: plain SVG, no charting library. Drawn
-    # as concentric ring strokes with stroke-dasharray/-dashoffset (each
-    # segment is a dash-length slice of the circle's circumference)
-    # rather than arc-path trigonometry - simpler to compute and the same
-    # technique produces the center hole for free, which a filled pie
-    # can't do without a second masking shape.
-    #
-    # Parallel arrays instead of a hashtable so slice order is exactly
-    # what the caller specifies (hashtable enumeration order isn't
-    # guaranteed in PowerShell, which would make the legend and slice
-    # order shuffle between runs on the same data).
+    # Plain SVG donut: one dashed circle per slice, no library. Arrays, not
+    # a hashtable, so the slices keep the caller's order.
     param([string[]]$Labels, [int[]]$Values, [string[]]$Colors, [int]$Size = 130, [string]$CenterLabel = "")
 
     $total = ($Values | Measure-Object -Sum).Sum
@@ -80,20 +126,14 @@ function Get-SvgPieChart {
         $pct = [Math]::Round(($value / $total) * 100, 1)
         $legend += "<div class='pie-legend-item'><span class='pie-legend-swatch' style='background:$color'></span>$($Labels[$i]) ($value, $pct%)</div>"
     }
-    # Rotated so the first segment starts at 12 o'clock instead of 3
-    # o'clock, matching where a reader's eye naturally lands first.
+    # Start at 12 o'clock.
     $donut = "<svg viewBox='0 0 $Size $Size' width='$Size' height='$Size'><g transform='rotate(-90 $cx $cy)'>$rings</g><text x='$cx' y='$($cy - 2)' text-anchor='middle' font-size='20' font-weight='600' fill='#2B2A28'>$total</text><text x='$cx' y='$($cy + 14)' text-anchor='middle' font-size='9' fill='#6B655C'>$CenterLabel</text></svg>"
     return "<div class='pie-chart-wrap'>$donut<div class='pie-legend'>$legend</div></div>"
 }
 
 function Import-PreviousFindings {
-    # Reads a findings CSV from a prior MooseAlto run for -CompareTo.
-    # Deliberately tolerant of a different/older schema: an export from an
-    # earlier MooseAlto version won't have every column this version does,
-    # and that's fine here, since only Rule/Type/Severity are actually
-    # used for comparison. Returns $null (not an error) on anything that
-    # goes wrong reading the file, so the caller can skip the comparison
-    # section cleanly rather than letting a bad path crash the whole run.
+    # The -CompareTo CSV. Only Rule/Type/Severity are needed, so older
+    # versions work. Any problem returns $null and the comparison is skipped.
     param([string]$Path)
     if (-not $Path) { return $null }
     if (-not (Test-Path -Path $Path -PathType Leaf)) {
@@ -107,6 +147,11 @@ function Import-PreviousFindings {
         Write-Host "Note: -CompareTo file couldn't be read as CSV ($Path). Skipping comparison." -ForegroundColor Yellow
         return $null
     }
+    if (-not $rows) {
+        # Header only: a run with no findings, so everything is new now.
+        $header = "$(Get-Content -Path $Path -TotalCount 1 -ErrorAction SilentlyContinue)"
+        if ($header -match '(^|,)"?Rule"?(,|$)' -and $header -match '(^|,)"?Type"?(,|$)') { return , @() }
+    }
     if (-not $rows -or -not ($rows | Get-Member -Name "Rule" -MemberType NoteProperty) -or -not ($rows | Get-Member -Name "Type" -MemberType NoteProperty)) {
         Write-Host "Note: -CompareTo file doesn't look like a MooseAlto findings CSV (missing Rule/Type columns). Skipping comparison." -ForegroundColor Yellow
         return $null
@@ -115,16 +160,8 @@ function Import-PreviousFindings {
 }
 
 function Get-FindingsComparison {
-    # Matches findings between runs by (Rule name, Type) - the simplest
-    # key that works without needing the previous run's underlying rule
-    # data, only its findings CSV. The real limitation: renaming a rule
-    # between runs makes its findings look "resolved" in the old name and
-    # "new" in the new name, even though nothing about the underlying
-    # issue changed. Matching on rule content (zone/address/app) instead
-    # of name would handle that, but also raises its own ambiguity when
-    # content legitimately changes between runs, so this starts with the
-    # simpler name-based key and that known tradeoff stated plainly rather
-    # than guessing at a fuzzier match.
+    # Matched by rule name and type. A renamed rule shows up as resolved
+    # plus new; matching on content would bring its own ambiguity.
     param([array]$CurrentFindings, [array]$PreviousFindings)
 
     $previousKeys = @{}
@@ -161,9 +198,7 @@ function Get-FindingsComparison {
 function Get-ReportLines {
     param([array]$Findings, [array]$Inventory, [string]$InputCsvPath, [array]$Rules, [string]$ElapsedText = "", [array]$InternetZoneSet = @(), [string]$CompareToPath = "", [string]$AddressObjectsCsvPath = "", [string]$AddressGroupsCsvPath = "", [array]$CriticalZoneSet = @(), [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [switch]$SkipLLM, [string]$ComparisonNarrative = "")
 
-    # Look up Source/Destination/Action/Profile by rule name at render time,
-    # rather than attaching them to every finding at creation. This avoids
-    # touching the ~25 places in DetectionRules.ps1 that build a finding.
+    # Rule columns are looked up by name here, so findings stay small.
     $ruleLookup = @{}
     foreach ($r in $Rules) {
         $ruleLookup[$r.Name] = [PSCustomObject]@{
@@ -178,26 +213,12 @@ function Get-ReportLines {
         }
     }
 
-    # Created/Modified are shown as extra columns only when the export
-    # actually has them - most don't, and an empty column on every single
-    # row would just be noise.
+    # Optional columns only show when something fills them.
     $showCreatedModified = @($Rules | Where-Object { $_.HasCreatedColumn -or $_.HasModifiedColumn }).Count -gt 0
-
-    # Same reasoning for Suggested Fix: shown only when at least one
-    # finding actually has one (deterministic ones are always present for
-    # a handful of types; AI-guessed ones only show up after the optional
-    # Gemini step runs and this function gets called a second time to
-    # rebuild the report with them included).
     $showSuggestedFix = @($Findings | Where-Object { $_.SuggestedFix }).Count -gt 0
-
-    # MITRE ATT&CK tags are AI-only (no deterministic equivalent), so this
-    # is simpler: absent entirely until the optional Gemini step runs and
-    # tags a subset of findings.
     $showMitreTag = @($Findings | Where-Object { $_.MitreTag }).Count -gt 0
 
-    # The any_any_any_allow finding itself is the broadest possible rule in
-    # the ruleset. Pin just that row to the top, not every other finding
-    # for the same rule (those still sort by severity normally).
+    # The any_any_any_allow row goes on top; the rest by severity.
     $anyAnyAnyRuleNames = @($Findings | Where-Object { $_.Type -eq "any_any_any_allow" } | Select-Object -ExpandProperty RuleName -Unique)
 
     $sorted = $Findings | Sort-Object { $SeverityOrder[$_.Severity] }
@@ -205,17 +226,14 @@ function Get-ReportLines {
     $rest = @($sorted | Where-Object { $_.Type -ne "any_any_any_allow" })
     $sorted = $pinned + $rest
 
-    $lines = @("# MooseAlto: Palo Alto Firewall Rule Hygiene Report", "")
+    $lines = @("# $script:ReportTitle", "")
     $lines += "**Input file:** $InputCsvPath  "
     $lines += "**Generated:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')  "
     if ($ElapsedText) {
         $lines += "**Processing time:** $ElapsedText  "
     }
 
-    # Only non-default/actually-supplied run settings show up here, not
-    # every parameter with its default value - the point is telling the
-    # reader what made THIS run different from a plain default run, not
-    # repeating the full parameter list.
+    # Only settings that differ from the defaults.
     $runInfoLines = @()
     if ($AddressObjectsCsvPath) { $runInfoLines += "**Address objects:** $AddressObjectsCsvPath  " }
     if ($AddressGroupsCsvPath) { $runInfoLines += "**Address groups:** $AddressGroupsCsvPath  " }
@@ -225,6 +243,7 @@ function Get-ReportLines {
     }
     if ($StaleHitDays -ne 365) { $runInfoLines += "**Stale threshold:** $StaleHitDays days  " }
     if ($MaxAddressListSize -ne 25) { $runInfoLines += "**Max address list size:** $MaxAddressListSize  " }
+    if ($script:NoSecurityProfileChecks) { $runInfoLines += "**Security profile check:** off, the firewall does no IPS/AV/URL inspection (-NoSecurityProfileChecks)  " }
     if ($SkipLLM) { $runInfoLines += "**AI analysis:** skipped (-SkipLLM)  " }
     $lines += $runInfoLines
     $lines += ""
@@ -246,19 +265,12 @@ function Get-ReportLines {
     $lines += ""
 
     # -------- Rule Statistics --------
-    # A quick visual overview before the detailed findings table: how the
-    # ruleset breaks down by action, direction, and profile coverage, plus
-    # where the findings severity actually lands. Uses the same
-    # zone/address "touches internet" signals as the deterministic checks,
-    # but a simpler direction classification than the Inventory's (that
-    # one deliberately distinguishes "definite" from "ambiguous" evidence
-    # to pick the single best label per rule; here it's an aggregate count
-    # across the whole ruleset, where that extra precision matters less
-    # than just being reasonably representative).
+    # Overview cards and charts. Direction here is a rough count, simpler
+    # than the inventory's per-rule label.
     $enabledRules = @($Rules | Where-Object { -not $_.Disabled })
     $disabledCount = @($Rules | Where-Object { $_.Disabled }).Count
     $allowRules = @($enabledRules | Where-Object { $_.Action -eq "allow" })
-    $denyDropCount = @($enabledRules | Where-Object { $_.Action -eq "deny" -or $_.Action -eq "drop" }).Count
+    $denyDropCount = @($enabledRules | Where-Object { (Get-ActionClass $_.Action) -eq "deny" }).Count
     $noProfileCount = @($allowRules | Where-Object { $_.Profile.ToLower() -eq "" -or $_.Profile.ToLower() -eq "none" }).Count
     $permissiveCount = @($allowRules | Where-Object { $null -eq $_.Application -and ($null -eq $_.SrcAddr -or $null -eq $_.DstAddr) }).Count
 
@@ -271,12 +283,7 @@ function Get-ReportLines {
         elseif ($dstInet) { $outboundCount++ }
         else { $internalCount++ }
     }
-    # Same classification, collapsed to a simpler yes/no split: how much
-    # of the ruleset touches the internet in any direction versus staying
-    # fully internal. The four-way Direction chart already has this
-    # information, but answering "how much of this ruleset is even
-    # internet-relevant" from it means mentally adding three of its four
-    # slices together - worth a card of its own instead.
+    # The same, as internet yes/no.
     $internetTouchingCount = $inboundCount + $outboundCount + $bothCount
 
     $appFrequency = @{}
@@ -289,20 +296,12 @@ function Get-ReportLines {
     }
     $topApps = $appFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
 
-    # Rules with Application left as "any" but a specific Service/port are
-    # completely invisible in the applications table above (they have no
-    # App-ID at all, that's the whole point of port_based_rule_missing_app_id).
-    # A large chunk of a legacy ruleset can be exactly this pattern, so it
-    # deserves its own visibility rather than silently not showing up
-    # anywhere in the statistics.
+    # Port-based rules don't appear in the app table, so they get their own.
     $serviceFrequency = @{}
     foreach ($r in $allowRules) {
         if ($null -ne $r.Application -or $null -eq $r.Service) { continue }
         foreach ($svc in $r.Service) {
-            # "application-default" without an App-ID isn't a concrete port,
-            # it just means no port restriction either, so it belongs with
-            # the fully-open-rule stats above, not a "which ports are being
-            # used instead of App-ID" table.
+            # Not a port.
             if ($svc -eq "application-default") { continue }
             if (-not $serviceFrequency.ContainsKey($svc)) { $serviceFrequency[$svc] = 0 }
             $serviceFrequency[$svc]++
@@ -310,13 +309,7 @@ function Get-ReportLines {
     }
     $topServices = $serviceFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
 
-    # Which check types fire most often, across the whole findings list
-    # (not scoped to allow rules only, unlike the app/service stats above -
-    # a finding is a finding regardless of the rule's action). Tells you
-    # AT A GLANCE whether the ruleset has one systemic problem repeated
-    # many times (e.g. most High findings are all
-    # no_security_profile_on_exposed_rule) versus many different distinct
-    # issues, which severity counts alone don't distinguish.
+    # Most frequent finding types: one problem repeated, or many?
     $typeFrequency = @{}
     foreach ($f in $Findings) {
         if (-not $typeFrequency.ContainsKey($f.Type)) { $typeFrequency[$f.Type] = 0 }
@@ -324,9 +317,7 @@ function Get-ReportLines {
     }
     $topTypes = $typeFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
 
-    # Which specific rules generate the most findings, so review effort
-    # can start with the rule causing the most noise rather than scanning
-    # the whole table for repeat offenders.
+    # Rules with the most findings: a good place to start.
     $ruleFrequency = @{}
     foreach ($f in $Findings) {
         if ($f.RuleName -eq "(ruleset-wide)") { continue }
@@ -335,10 +326,7 @@ function Get-ReportLines {
     }
     $topRulesByFindings = $ruleFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
 
-    # Tags follow the same multi-value convention as addresses/services
-    # elsewhere in this file (";" normally, "," seen on at least one real
-    # export), so split the same way rather than counting the whole
-    # field as one tag.
+    # Tags split on ";" or ",", like other fields.
     $tagFrequency = @{}
     $noTagCount = 0
     foreach ($r in $Rules) {
@@ -355,11 +343,7 @@ function Get-ReportLines {
     }
     $topTags = $tagFrequency.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 8
 
-    # App-ID vs port-based split: a quick indicator of how modernized the
-    # ruleset's matching is. Three-way rather than two-way, since "neither
-    # restricts anything" (any/any) is a meaningfully different case from
-    # "restricted, but by port instead of App-ID" - collapsing them would
-    # overstate how port-based the ruleset actually is.
+    # App-ID, port-based, or neither (any/any).
     $appIdBasedCount = @($allowRules | Where-Object { $null -ne $_.Application }).Count
     $portBasedCount = @($allowRules | Where-Object { $null -eq $_.Application -and $_.Service -and ($_.Service -notcontains "application-default") }).Count
     $fullyOpenBothCount = $allowRules.Count - $appIdBasedCount - $portBasedCount
@@ -383,19 +367,13 @@ function Get-ReportLines {
     $appIdPie = Get-SvgPieChart -Labels @("App-ID based", "Port-based (no App-ID)", "Fully open (any/any)") -Values @($appIdBasedCount, $portBasedCount, $fullyOpenBothCount) -Colors @("#A6720F", "#C1793A", "#B33A3A") -CenterLabel "allow rules"
     $trafficScopePie = Get-SvgPieChart -Labels @("Touches internet", "Internal only") -Values @($internetTouchingCount, $internalCount) -Colors @("#B33A3A", "#6B8F5E") -CenterLabel "allow rules"
 
-    # Small hand-drawn inline icons (shield / exchange / lock), not an
-    # icon font: MooseAlto's whole pitch is "no network calls unless you
-    # opt into the Gemini step," so a webfont/CDN icon set would
-    # contradict that even for something this cosmetic.
+    # Inline icons: a CDN icon font would mean a network call.
     $iconShield = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><path d='M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5l8-3z'/></svg>"
     $iconExchange = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><path d='M7 3l4 4-4 4M3 7h8M17 21l-4-4 4-4M21 17h-8'/></svg>"
     $iconLock = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><rect x='4' y='11' width='16' height='9' rx='1'/><path d='M8 11V7a4 4 0 018 0v4'/></svg>"
     $iconGlobe = "<svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='#A6720F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-3px;margin-right:6px;'><circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3c2.5 2.7 4 6 4 9s-1.5 6.3-4 9c-2.5-2.7-4-6-4-9s1.5-6.3 4-9z'/></svg>"
 
-    # All four pies together in one row rather than splitting any off into
-    # their own row further down: distribution charts belong next to each
-    # other, and a lone chart in its own full-width row was wasting most
-    # of that row's horizontal space.
+    # The four charts share one row.
     $chartsHtml = "<div class='chart-row'>"
     $chartsHtml += "<div><div class='pie-chart-title'>${iconShield}Findings by severity</div>$severityPie</div>"
     $chartsHtml += "<div><div class='pie-chart-title'>${iconExchange}Allow rules by direction</div>$directionPie</div>"
@@ -403,14 +381,8 @@ function Get-ReportLines {
     $chartsHtml += "<div><div class='pie-chart-title'>${iconGlobe}Allow rules: internal vs internet-touching</div>$trafficScopePie</div>"
     $chartsHtml += "</div>"
 
-    # Each of these is its own self-contained block, built independently
-    # and only if it actually has data. Rather than hard-pairing specific
-    # ones together (which breaks visually whenever one side happens to be
-    # empty on a given ruleset, leaving its partner stranded alone with
-    # empty space next to it), they're collected into one list and packed
-    # two-per-row in whatever order they come, so a report is never left
-    # with an orphaned single table next to blank space unless there's
-    # truly an odd number of blocks with data.
+    # Only tables with data are added, then packed into rows, so an empty
+    # one doesn't leave a gap.
     $tableBlocks = New-Object System.Collections.Generic.List[string]
 
     if ($topApps) {
@@ -458,7 +430,7 @@ function Get-ReportLines {
     $comparison = $null
     if ($CompareToPath) {
         $previousFindings = Import-PreviousFindings -Path $CompareToPath
-        if ($previousFindings) {
+        if ($null -ne $previousFindings) {
             $comparison = Get-FindingsComparison -CurrentFindings $Findings -PreviousFindings $previousFindings
 
             $lines += "## Comparison with Previous Report"
@@ -483,16 +455,9 @@ function Get-ReportLines {
         }
     }
 
-    # Build one unified, render-ready row list rather than keeping the
-    # comparison as separate New/Resolved tables: a finding that's
-    # "Resolved" no longer has a row in $Findings at all (the rule that
-    # caused it may not even exist anymore), so its columns come straight
-    # from the previous run's CSV instead of $ruleLookup, which only
-    # knows about this run's rules. Both shapes get normalized into the
-    # same row structure here so one table and one sort can cover all of
-    # it, keeping severity order intact across current AND resolved rows
-    # together instead of dumping resolved ones at the end regardless of
-    # how severe they were.
+    # One table for everything. Resolved findings aren't in $Findings any
+    # more, so their columns come from the previous CSV; all rows then sort
+    # by severity together.
     $newKeys = @{}
     if ($comparison) {
         foreach ($f in $comparison.New) { $newKeys["$($f.RuleName)|$($f.Type)"] = $true }
@@ -532,17 +497,11 @@ function Get-ReportLines {
                 Mitre    = ""
             })
         }
-        # Stable sort: within the same severity, current-run rows (already
-        # in their existing order, any_any_any_allow pinned first among
-        # them) stay ahead of resolved ones added just above, rather than
-        # shuffling the whole table.
+        # Stable sort: within a severity, current rows stay ahead of resolved.
         $renderRows = [System.Collections.Generic.List[PSCustomObject]]@($renderRows | Sort-Object { $SeverityOrder[$_.Severity] })
     }
 
-    # Header/separator/rows are built once, with the two optional column
-    # groups (Created/Modified, Comparison) spliced in conditionally,
-    # rather than four near-duplicate hardcoded branches for every
-    # combination of "has compare data" x "has created/modified data".
+    # Optional columns are spliced in where needed.
     $lines += "## Algorithmic-based Findings"
     $lines += ""
     $extraHeader = if ($showCreatedModified) { " Created | Modified |" } else { "" }
@@ -587,6 +546,9 @@ function Get-ReportLines {
 
     return $lines
 }
+
+# MooseAlto.ps1 changes it for other vendors.
+$script:ReportTitle = "MooseAlto: Palo Alto Firewall Rule Hygiene Report"
 
 # --------------------------------------------------------------------------
 # Gemini call (masked input only)
@@ -668,21 +630,10 @@ technique. Omit comparison_narrative entirely (not an empty string) if no
 "@
 
 function Invoke-HttpPostWithSpinner {
-    # Posts JSON via System.Net.Http.HttpClient asynchronously and polls the
-    # Task on the calling thread to animate a spinner. Unlike Start-Job,
-    # this stays in the same process/scope, so it doesn't need any of the
-    # dot-sourced functions or script variables re-loaded into a separate
-    # runspace. Works the same way on Windows PowerShell 5.1 and PowerShell 7.
-    #
-    # HttpClient's own default timeout is 100 seconds. A larger batch (many
-    # findings, Tags included, MITRE mapping requested) can legitimately take
-    # longer than that for Gemini to answer, and once HttpClient's internal
-    # watchdog fires it cancels the request itself: GetAwaiter().GetResult()
-    # then rethrows a TaskCanceledException whose default message is exactly
-    # "A task was canceled" (localized: "Un'attivita e' stata annullata").
-    # That is not a sign of a bad API key or a malformed request; it just
-    # means the response did not arrive within TimeoutSeconds. Widening the
-    # timeout here reduces how often that happens.
+    # Async POST, polled here to draw a spinner. Same process, unlike
+    # Start-Job, so nothing needs reloading. The default 100 s timeout is
+    # too short for big batches; when it hits you get "A task was canceled",
+    # which is a timeout, not a bad key.
     param([string]$Uri, [string]$JsonBody, [string]$Message = "Contacting Gemini", [int]$TimeoutSeconds = 180)
 
     Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
@@ -724,27 +675,33 @@ function Invoke-GeminiNarrative {
         contents           = @(@{ role = "user"; parts = @(@{ text = $UserPrompt }) })
         generationConfig   = @{ temperature = 0.2 }
     }
+    # Fail closed: never send a request that still holds an IP address.
+    if (-not (Test-GeminiPayloadClean -Texts @($SystemPrompt, $UserPrompt))) { return $null }
     $body = $bodyObj | ConvertTo-Json -Depth 10
     $uri = "https://generativelanguage.googleapis.com/v1beta/models/${Model}:generateContent?key=$ApiKey"
 
-    # Transient server-side errors (rate limit / momentarily unavailable) are
-    # worth a short retry with exponential backoff rather than giving up
-    # immediately. A 503 in particular is usually Gemini being briefly
-    # overloaded, not a problem with the request itself.
+    # Rate limits and 5xx are usually brief: retry with backoff.
     $transientStatusCodes = @(429, 500, 502, 503, 504)
     $result = $null
+
+    # Test hook (Test-AiAnalysis.ps1): no network. The request goes to the
+    # log file and the canned answer comes back as Gemini's; everything
+    # else runs for real.
+    if ($env:MOOSEALTO_TEST_GEMINI_RESPONSE) {
+        if ($env:MOOSEALTO_TEST_GEMINI_REQUEST_LOG) { Add-Content -Path $env:MOOSEALTO_TEST_GEMINI_REQUEST_LOG -Value $body }
+        $mockText = Get-Content -Path $env:MOOSEALTO_TEST_GEMINI_RESPONSE -Raw
+        $mockBody = @{ candidates = @(@{ content = @{ parts = @(@{ text = $mockText }) } }) } | ConvertTo-Json -Depth 6
+        $result = [PSCustomObject]@{ IsSuccess = $true; StatusCode = 200; Body = $mockBody }
+        $MaxAttempts = 0
+    }
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
             $result = Invoke-HttpPostWithSpinner -Uri $uri -JsonBody $body -Message "Contacting Gemini (attempt $attempt/$MaxAttempts)" -TimeoutSeconds $TimeoutSeconds
         }
         catch {
-            # A client-side timeout surfaces here as a TaskCanceledException
-            # (sometimes wrapped in the ambient AggregateException from
-            # GetAwaiter().GetResult()), not as an HTTP status code, so it
-            # never reaches the transient-status-code check below. Treat it
-            # the same way: retry with backoff instead of giving up on the
-            # first attempt.
+            # A timeout arrives as an exception, not a status code: retry it
+            # like the transient errors.
             $inner = $_.Exception
             $isTimeout = $false
             while ($inner) {
@@ -803,21 +760,14 @@ function Invoke-GeminiNarrative {
 }
 
 # --------------------------------------------------------------------------
-# HTML export (optional). Converts this script's own Markdown output to a
-# standalone HTML file with basic styling (severity-colored table rows), no
-# external dependencies required. Open it in any browser; use Print > Save
-# as PDF there if a PDF is needed.
-#
-# Targets this script's own Markdown structure specifically (headers,
-# tables, blockquotes, bold/code spans). Not a general-purpose parser.
+# HTML export: turns our own Markdown into a standalone HTML page (no
+# external files). Only handles what we generate; not a general parser.
 # --------------------------------------------------------------------------
 
 function ConvertTo-ReportHtml {
-    param([string]$MarkdownContent, [string]$Title = "MooseAlto: Palo Alto Firewall Rule Hygiene Report")
+    param([string]$MarkdownContent, [string]$Title = $script:ReportTitle)
 
-    # Built from its Unicode codepoint instead of a literal character in this
-    # file: Windows PowerShell 5.1 reads a .ps1 without a UTF-8 BOM using the
-    # system ANSI codepage, which mis-decodes multi-byte literals like this.
+    # From the codepoint: PS 5.1 would mangle a literal emoji in a BOM-less file.
     $robotEmoji = [System.Char]::ConvertFromUtf32(0x1F916)
 
     $css = @"
@@ -1109,12 +1059,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
     foreach ($line in $lines) {
         if ($line -match '^%%RAWHTML_BASE64%%(.+)$') {
-            # Escape hatch for content that must not go through the
-            # markdown pipeline below (SVG charts, stat card grids): the
-            # table/list/paragraph handling below assumes plain text and
-            # would mangle multi-line tags or literal < > characters.
-            # Base64 avoids that entirely rather than trying to keep raw
-            # HTML "line safe" during the split above.
+            # Raw HTML (charts, cards) travels as base64 so the Markdown
+            # handling below can't mangle it.
             $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Matches[1]))
             $htmlLines.Add($decoded)
             continue
@@ -1125,25 +1071,13 @@ document.addEventListener('DOMContentLoaded', function () {
             if ($isSeparatorRow) { continue }
 
             if (-not $inTable) {
-                # The small Summary table doesn't need per-column filters -
-                # there are only a handful of rows. The bigger data tables
-                # (findings, inventory) get a filter input under each header
-                # cell, plus a clear-filters button and a visible-row count.
+                # Filters on the big tables, not on the Summary.
                 $addFilters = $currentSectionHeading -ne "Summary"
                 $actionColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "action")
                 $compareColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "comparison")
                 $sourceColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "source")
                 $destColumnIndex = [array]::IndexOf(($cells | ForEach-Object { $_.ToLower() }), "destination")
-                # Column resizing is only wired up for the two big,
-                # many-column tables (Findings, Inventory) via this same
-                # "not Summary" condition already used for filters - not
-                # Summary (2 columns, nothing worth resizing), and not the
-                # small Rule Statistics tables either, which are built via
-                # a separate raw-HTML path and never reach this branch at
-                # all. Freezing a small table's width into fixed pixels
-                # would lock in whatever a flex-row + width:100% happened
-                # to stretch it to at load time, not its actual content
-                # width.
+                # Resizable columns too, only on the big tables.
                 $tableClass = if ($addFilters) { " class='resizable-table'" } else { "" }
                 $htmlLines.Add("<div class='table-wrap'><table$tableClass>")
                 $htmlLines.Add("<tr>" + (($cells | ForEach-Object { "<th><span class='col-drag-label'>$_</span></th>" }) -join "") + "</tr>")
@@ -1181,16 +1115,8 @@ document.addEventListener('DOMContentLoaded', function () {
                         else { "<td>$($cells[$c])</td>" }
                     }
                     elseif ($c -eq $sourceColumnIndex -or $c -eq $destColumnIndex) {
-                        # Truncated with an ellipsis by default and the full
-                        # value available on hover via the native title
-                        # tooltip (no JS needed for that part): a Source or
-                        # Destination cell listing many negated ranges or
-                        # individually-enumerated addresses can otherwise
-                        # force the whole table wide enough that reaching the
-                        # Type/Detail columns means scrolling past a wall of
-                        # IPs. Dragging the column wider (see resize handles)
-                        # overrides this by simply giving the cell more room
-                        # to show before it needs to truncate at all.
+                        # Long address lists are cut with an ellipsis; the
+                        # full text is in the tooltip, or widen the column.
                         "<td class='col-truncate' title='$($cells[$c].Replace("'", "&#39;"))'>$($cells[$c])</td>"
                     }
                     else { "<td>$($cells[$c])</td>" }
@@ -1223,23 +1149,15 @@ document.addEventListener('DOMContentLoaded', function () {
             $headingText = $Matches[1]
             $currentSectionHeading = $headingText
 
-            # Each top-level section becomes a collapsible <details>, open by
-            # default. The previous one (if any) needs closing first - the
-            # AI section's own div also needs closing before that, since
-            # it's nested inside the details for that section.
+            # Each section is a collapsible <details>; close the previous one
+            # (and the AI div inside it) first.
             if ($inAiSection) { $htmlLines.Add("</div>"); $inAiSection = $false }
             if ($inDetailsSection) { $htmlLines.Add("</details>") }
 
-            # Everything from the AI-Assisted Summary heading onward gets a
-            # visually distinct container, reinforcing at a glance which
-            # part of the report is deterministic and which is AI-generated,
-            # not just via the wording of the heading itself.
+            # The AI part gets its own look, so nobody mistakes it for the
+            # computed findings. The emoji is in the text: CSS ::before emoji
+            # render unevenly across browsers.
             $isAiHeading = $headingText -match 'AI-Assisted'
-            # The emoji lives in the actual heading text, not a CSS
-            # ::before content property: generated-content emoji rendering
-            # is inconsistent across browsers/viewers in a way that plain
-            # text emoji isn't, since text goes through the standard font
-            # fallback path uniformly.
             $displayHeadingText = if ($isAiHeading) { "$robotEmoji $headingText" } else { $headingText }
             $htmlLines.Add("<details open><summary><h2>$displayHeadingText</h2></summary>")
             $inDetailsSection = $true
@@ -1285,9 +1203,7 @@ document.addEventListener('DOMContentLoaded', function () {
 }
 
 function Export-FindingsCsv {
-    # Flat CSV of the findings table, same columns as the HTML/Markdown
-    # table, for further filtering/pivoting in Excel or similar. Always
-    # produced alongside the main report, not gated behind a switch.
+    # The findings table as CSV, same columns as the report.
     param([array]$Findings, [array]$Rules, [string]$CsvPath)
 
     $ruleLookup = @{}
@@ -1304,10 +1220,14 @@ function Export-FindingsCsv {
         }
     }
 
+    # Suggested Fix / MITRE columns only exist once the AI step has filled
+    # them (never on an offline run, so those CSVs are unchanged).
+    $hasAiColumns = @($Findings | Where-Object { $_.PSObject.Properties['SuggestedFix'] -or $_.PSObject.Properties['MitreTag'] }).Count -gt 0
+
     $sorted = $Findings | Sort-Object { $SeverityOrder[$_.Severity] }
     $rows = foreach ($f in $sorted) {
         $ctx = $ruleLookup[$f.RuleName]
-        [PSCustomObject]@{
+        $row = [PSCustomObject]@{
             Severity    = $f.Severity
             Rule        = $f.RuleName
             Source      = if ($ctx) { $ctx.Src } else { "" }
@@ -1321,30 +1241,29 @@ function Export-FindingsCsv {
             Type        = $f.Type
             Detail      = $f.Detail
         }
+        if ($hasAiColumns) {
+            $row | Add-Member -NotePropertyName 'Suggested Fix' -NotePropertyValue $(if ($f.PSObject.Properties['SuggestedFix']) { $f.SuggestedFix } else { '' })
+            $row | Add-Member -NotePropertyName 'MITRE ATT&CK' -NotePropertyValue $(if ($f.PSObject.Properties['MitreTag']) { $f.MitreTag } else { '' })
+        }
+        $row
     }
 
-    $rows | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8
+    # No findings: write the header anyway (Export-Csv would write nothing),
+    # so -CompareTo and -AnalyzeFindingsCsv still recognise the file.
+    if (@($rows).Count -eq 0) {
+        '"Severity","Rule","Source","Destination","Application","Service","Action","Profile","Created","Modified","Type","Detail"' | Set-Content -Path $CsvPath -Encoding utf8
+    }
+    else {
+        $rows | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8
+    }
     Write-Host "CSV findings written to $CsvPath" -ForegroundColor Green
 }
 
 function Export-FindingsJson {
-    # JSON Lines (one finding per line, each an independently parseable
-    # JSON object), not a single nested document - this is what Splunk
-    # (and most log-oriented SIEM ingestion) handles automatically without
-    # extra config: each line becomes its own event, and top-level fields
-    # like severity/rule_name/type are immediately searchable/aggregable
-    # (e.g. "stats count by severity") with no spath/mvexpand needed to
-    # first unpack a nested array. Metadata (tool, tool_version,
-    # generated_at, input_file) is repeated on every line rather than
-    # given once at a file level, since each line needs to stand alone as
-    # its own event - there's no single-event summary line mixed in here
-    # for the same reason: a differently-shaped line would either break
-    # automatic field extraction or show up as a stray, oddly-shaped
-    # event. Aggregate counts are a trivial SPL query away
-    # ("stats count by severity") and don't need precomputing here.
-    # Includes SuggestedFix and MitreTag when present (only after the
-    # optional Gemini step), omitted rather than emitted as null noise
-    # when they were never computed for this run.
+    # JSON Lines, one finding per line, so a SIEM like Splunk takes each
+    # line as an event with no extra config. The run metadata is repeated
+    # on every line and there's no summary line, so every line has the same
+    # shape. Suggested fix and MITRE only when the AI step filled them.
     param([array]$Findings, [array]$Rules, [string]$JsonPath, [string]$InputCsvPath, [string]$ToolVersion)
 
     $ruleLookup = @{}
@@ -1410,14 +1329,17 @@ function Export-InventoryCsv {
         }
     }
 
-    $rows | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8
+    if (@($rows).Count -eq 0) {
+        '"Direction","Rule","Source","Destination","Application","Service","Action","Profile"' | Set-Content -Path $CsvPath -Encoding utf8
+    }
+    else {
+        $rows | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding utf8
+    }
     Write-Host "CSV inventory written to $CsvPath" -ForegroundColor Green
 }
 
 function Save-HtmlReport {
-    # Converts markdown lines straight to HTML and writes it. No
-    # intermediate file round-trip needed, since ConvertTo-ReportHtml
-    # already works on an in-memory string.
+    # Markdown lines to HTML file.
     param([array]$MarkdownLines, [string]$HtmlPath)
     $htmlContent = ConvertTo-ReportHtml -MarkdownContent ($MarkdownLines -join "`n")
     $htmlContent | Out-File -FilePath $HtmlPath -Encoding utf8

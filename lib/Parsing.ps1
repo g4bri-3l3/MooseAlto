@@ -3,13 +3,8 @@
 # --------------------------------------------------------------------------
 
 function Parse-ZoneField {
-    # Zones can be multi-valued in real exports (e.g. "outside;zone-to-hub").
-    # The documented/most commonly confirmed separator is ";", but at least
-    # one real row has been seen using "," instead for this same field
-    # (e.g. "outside,voip") - possibly a different export tool/version, or
-    # inconsistent hand-editing. Splitting on either avoids silently
-    # treating "outside,voip" as one bogus zone name that matches nothing.
-    # Returns an array of zone name strings. Never returns $null; "any" is used if blank.
+    # Zones can be multi-valued. Exports normally use ";" but we've seen ","
+    # too, so accept both. Blank means "any"; never returns $null.
     param([string]$Field)
     $Field = $Field.Trim()
     if ($Field -eq "") { return @("any") }
@@ -19,14 +14,8 @@ function Parse-ZoneField {
 }
 
 function Parse-AddressField {
-    # Multi-value separator is normally ";" (not ",", since "," is the CSV
-    # delimiter), but at least one real row has been seen using "," for a
-    # different multi-value field (Service) instead, so both are accepted
-    # here too, for consistency and safety, rather than assuming this field
-    # is immune to the same inconsistency.
-    # IP ranges, "[Negate] ..." entries, and address-object names are kept
-    # as opaque tokens (exact-match only). Only plain CIDR/IP gets real
-    # containment logic.
+    # Same ";" or "," split as the zones. Returns $null for any. Tokens are
+    # kept as written; IpHelpers decides later what it can do math on.
     param([string]$Field)
     $Field = $Field.Trim()
     if ($Field -eq "" -or $Field.ToLower() -eq "any") { return $null }
@@ -41,12 +30,7 @@ function Parse-AddressField {
 }
 
 function Parse-ListField {
-    # Same dual-separator reasoning as Parse-ZoneField/Parse-AddressField
-    # above: a real row has been seen with Service values comma-separated
-    # ("tcp-5444,udp-53") instead of the more commonly confirmed ";".
-    # Splitting on either avoids silently treating the whole string as one
-    # unrecognized token, which would make every port in it invisible to
-    # the risky-port checks.
+    # Applications and services: same split, lowercased. $null means any.
     param([string]$Field)
     $Field = $Field.Trim()
     if ($Field -eq "" -or $Field.ToLower() -eq "any") { return $null }
@@ -54,14 +38,8 @@ function Parse-ListField {
 }
 
 function Get-ServicePorts {
-    # PAN-OS represents a port two different ways depending on context: the
-    # raw "tcp/23" protocol/port syntax, or a named custom Service object
-    # following the common "tcp-23" / "udp-23" naming convention (the name
-    # itself encodes the port). Both are matched here so a rule using a
-    # named service object like "tcp-23" is checked the same as one using
-    # "tcp/23" directly. Anchored to a tcp/udp prefix specifically, rather
-    # than any name ending in "-<number>", so an unrelated custom object
-    # name that happens to end in digits isn't misread as a port.
+    # Ports from "tcp/23" or from service objects named "tcp-23". Only a
+    # tcp/udp prefix counts, so "web-8080" isn't mistaken for a port.
     param($ServiceTokens)
     $ports = @()
     if (-not $ServiceTokens) { return $ports }
@@ -72,12 +50,8 @@ function Get-ServicePorts {
 }
 
 function Get-ServiceUdpPorts {
-    # Same idea as Get-ServicePorts above, but keeps only ports explicitly
-    # named on UDP ("udp-<port>"/"udp/<port>"), not TCP. Needed for checks
-    # where the transport itself is part of the risk being flagged: UDP's
-    # lack of a handshake is what makes source-spoofed reflection/
-    # amplification abuse possible in the first place, a risk the same
-    # port number over TCP would not carry.
+    # UDP ports only, for the amplification check (spoofed reflection needs
+    # UDP; the same port over TCP isn't a risk there).
     param($ServiceTokens)
     $ports = @()
     if (-not $ServiceTokens) { return $ports }
@@ -88,13 +62,9 @@ function Get-ServiceUdpPorts {
 }
 
 function Repair-DoubleWrappedCsvLine {
-    # Some real PAN-OS/Panorama exports wrap the ENTIRE CSV line in an
-    # extra outer pair of quotes, doubling every original quote character
-    # in the process (seen across a Panorama 11.1 export and direct
-    # firewall PAN-OS 10/11.1 exports, so this looks tied to export method
-    # rather than PAN-OS version specifically). A standards-compliant CSV
-    # parser reads such a line as ONE giant field instead of the intended
-    # columns, so this needs undoing before normal parsing.
+    # Some exports (Panorama 11.1, PAN-OS 10/11.1) wrap the whole line in
+    # quotes and double every quote inside. Undo that, or the CSV parser
+    # sees the line as a single field.
     param([string]$Line)
     if (-not $Line.StartsWith('"')) { return $Line }
     $trimmed = $Line
@@ -104,17 +74,9 @@ function Repair-DoubleWrappedCsvLine {
 }
 
 function Remove-BomNoise {
-    # Strips a literal UTF-8 BOM character, and also a corrupted/mojibake
-    # BOM: the 3 raw BOM bytes (EF BB BF) misread as Latin-1/CP1252 text
-    # and re-saved as UTF-8, which decodes back to 3 separate visible
-    # characters (U+00EF, U+00BB, U+00BF) instead of the single invisible
-    # BOM codepoint. Built from explicit char codes rather than typing the
-    # glyphs directly, since a literal string in the script source risks
-    # an encoding mismatch with how PowerShell's own parser reads this
-    # .ps1 file, which a byte-exact comparison can't afford. Seen at the
-    # very start of a real export, and also re-exposed mid-string after
-    # peeling back one layer of the double-wrap below, when the two
-    # corruptions stack on the same line.
+    # Strips a real BOM and the mojibake one ("ï»¿", the BOM bytes read as
+    # CP1252 and saved again). Char codes instead of literal glyphs so the
+    # .ps1 file's own encoding can't break the comparison.
     param([string]$Text)
     $Text = $Text.TrimStart([char]0xFEFF)
     $mojibakeBom = [string]([char]0xEF) + [string]([char]0xBB) + [string]([char]0xBF)
@@ -123,35 +85,17 @@ function Remove-BomNoise {
 }
 
 function Get-CsvFileContent {
-    # Reads a CSV file's full text, strips a UTF-8 BOM (including the
-    # corrupted/mojibake form, see Remove-BomNoise), and transparently
-    # repairs the double-quote-wrapping issue above when detected on the
-    # first line (its signature: a doubled-empty-quote for the blank
-    # leading column, immediately followed by a comma - "any-noise-then-
-    # empty-quote" rather than a strict prefix check, since the mojibake
-    # BOM can sit between the wrapping quote and that signature instead
-    # of always being cleanly at position 0).
-    #
-    # Applied in a loop, not just once: on at least one real export, the
-    # header line specifically (not the data rows) was wrapped TWICE, with
-    # a re-exposed mojibake BOM sitting between the two layers. A single
-    # fixed pass silently left it half-unwrapped, which produced a
-    # confidently wrong report (garbage column names read as "any"/blank,
-    # not an error) rather than failing loudly, so this can't be treated
-    # as a one-shot fix.
+    # Reads the file, drops BOM noise and unwraps double-wrapped lines.
+    # It loops because we've seen a header wrapped twice, with a mojibake
+    # BOM between the layers; one pass left garbage column names and a
+    # silently wrong report.
     param([string]$Path)
     $rawContent = Get-Content -Path $Path -Raw
     $rawContent = Remove-BomNoise -Text $rawContent
     $lines = $rawContent -split "`r?`n"
     if ($lines.Count -gt 0) {
-        # A short run of junk before the first comma is enough to suggest
-        # a wrapped leading field (whether that's a bare "," or a
-        # corrupted-BOM-then-quoted-empty-field "ï»¿"","), but that prefix
-        # alone isn't a safe enough signal on its own: a perfectly normal,
-        # unwrapped CSV that happens to start with a short quoted value
-        # (e.g. "ID",Name,...) would match it too. Requiring several ""
-        # pairs elsewhere in the same line is what actually distinguishes
-        # "this whole line got double-quote-wrapped" from a coincidence.
+        # The prefix alone would also match a normal line like "ID",Name,...
+        # so we also want several "" pairs before calling it wrapped.
         $wrapPrefix = '^"[^,]{0,10}?,'
         $passes = 0
         while ($passes -lt 5) {
@@ -165,21 +109,26 @@ function Get-CsvFileContent {
     return ($lines -join "`r`n")
 }
 
+function Get-DummyCsvHeaders {
+    # Placeholder names to read the header line as a data row: one per
+    # comma plus one, at least $Minimum. A fixed count used to drop columns
+    # (rule usage exports have more than 20). Extra names come back $null.
+    param([string]$HeaderLine, [int]$Minimum = 20)
+    $n = [Math]::Max($Minimum, ([regex]::Matches("$HeaderLine", ',')).Count + 1)
+    return @(1..$n | ForEach-Object { "Col$_" })
+}
+
 function Import-PaloAltoRules {
     param([string]$Path)
 
-    # PAN-OS exports often have an unnamed leading row-number column.
-    # Import-Csv's header auto-detection falls back to H1/H2/H3... for ALL
-    # columns when it hits a blank header, misaligning every named property.
-    # Read and repair the header explicitly: parse the header line as a data
-    # row with dummy column names, recover the real header text, patch the
-    # blank first entry, then re-parse using that fixed header list
-    # (skipping the original header row since we supply our own).
+    # Exports often start with an unnamed row-number column, and a blank
+    # header makes Import-Csv rename every column H1, H2... So we read the
+    # header ourselves, name the blank one, and parse with that list.
     $fileContent = Get-CsvFileContent -Path $Path
     $fileLines = $fileContent -split "`r?`n"
 
-    $dummyHeaders = 1..40 | ForEach-Object { "Col$_" }
     $headerLineRaw = $fileLines[0]
+    $dummyHeaders = Get-DummyCsvHeaders -HeaderLine $headerLineRaw -Minimum 40
     $headerParsed = $headerLineRaw | ConvertFrom-Csv -Header $dummyHeaders
     $realHeaderNames = @($headerParsed.PSObject.Properties.Value | Where-Object { $null -ne $_ } | ForEach-Object { $_.Trim() })
     if ($realHeaderNames.Count -gt 0 -and $realHeaderNames[0] -eq "") {
@@ -188,17 +137,12 @@ function Import-PaloAltoRules {
 
     $rows = $fileContent | ConvertFrom-Csv -Header $realHeaderNames | Select-Object -Skip 1
 
-    # If a different PAN-OS/Panorama version (or export type) uses different
-    # column names, a property lookup like $row.'Source Address' returns
-    # $null WITHOUT erroring. The script would keep running and silently
-    # treat that field as blank/any for every rule, producing a report that
-    # looks complete but is built on wrong data. Warn loudly here instead,
-    # so a schema mismatch is obvious immediately rather than discovered
-    # later from a suspiciously "clean" report.
+    # A renamed column doesn't error, it just reads as blank (= any) on
+    # every rule. Say so loudly instead of producing a clean-looking report.
     $expectedColumns = @("Name", "Source Zone", "Source Address", "Destination Zone", "Destination Address", "Application", "Service", "Action")
     $missingColumns = @($expectedColumns | Where-Object { $realHeaderNames -notcontains $_ })
     if ($missingColumns.Count -gt 0) {
-        Write-Host "ERROR: This CSV is missing expected column(s): $($missingColumns -join ', '). This script's parser was built against one real PAN-OS export (see README). If your PAN-OS/Panorama version uses different column names, results will be silently incomplete rather than erroring out. Compare this file's header row against the README's documented schema before trusting the report." -ForegroundColor Red
+        Write-Host "ERROR: This CSV is missing expected column(s): $($missingColumns -join ', '). The parser expects the security rulebase export of PAN-OS 10, 11 or 12 (see README). If your PAN-OS/Panorama version uses different column names, results will be silently incomplete rather than erroring out. Compare this file's header row against the README's documented schema before trusting the report." -ForegroundColor Red
     }
 
     $hasDisabledColumn = $realHeaderNames -contains "Disabled"
@@ -206,27 +150,16 @@ function Import-PaloAltoRules {
     $hasCreatedColumn = $realHeaderNames -contains "Created"
     $hasModifiedColumn = $realHeaderNames -contains "Modified"
 
-    # Match by substring rather than the exact "Rule Usage: Hit Count" -
-    # different PAN-OS/Panorama versions and export types have been seen to
-    # word this differently (with or without the colon, different prefix).
-    # Whichever real column contains "Hit Count" is used, so this doesn't
-    # need to be re-taught the exact wording per version.
+    # The wording changes between versions ("Rule Usage: Hit Count",
+    # "Rule Usage Hit Count"...), so match on the substring.
     $hitCountColumnName = $realHeaderNames | Where-Object { $_ -match "Hit Count" } | Select-Object -First 1
     $hasHitCountColumn = $null -ne $hitCountColumnName
 
-    # Same reasoning as Hit Count above: match by substring so exact
-    # wording differences across exports don't matter.
     $lastHitColumnName = $realHeaderNames | Where-Object { $_ -match "Last Hit" } | Select-Object -First 1
     $hasLastHitColumn = $null -ne $lastHitColumnName
 
-    # The Rule Usage status column (used/unused/partially used, see
-    # https://docs.paloaltonetworks.com/ngfw/administration/monitoring/view-policy-rule-usage)
-    # has been seen with an unpredictable, even duplicated, header name
-    # ("Rule Usage Rule Usage" in one real export). Rather than guess yet
-    # another exact string, detect it by its DATA: whichever column's
-    # observed values are entirely drawn from that fixed 3-value set is the
-    # one, regardless of what it's named. Sampling the first 50 rows keeps
-    # this cheap on large rulesets.
+    # The used/unused/partially used column has odd names ("Rule Usage Rule
+    # Usage"), so find it by its values instead, looking at the first 50 rows.
     $usageStatusValues = @("used", "unused", "partially used")
     $usageStatusColumnName = $null
     $sampleRows = $rows | Select-Object -First 50
@@ -245,27 +178,20 @@ function Import-PaloAltoRules {
     $namePrefixDisabledSeen = $false
     $seenNames = @{}
     $duplicateNamesSeen = $false
+    $lastColumn = $realHeaderNames[$realHeaderNames.Count - 1]
+    $shortRows = @()
+    $blankActionRows = @()
     foreach ($row in $rows) {
         $rawName = $(if ($row.Name) { $row.Name } else { "rule_$i" })
 
-        # Some real Panorama exports (seen on version 11) don't have a
-        # separate Disabled column at all. Instead the Name field itself is
-        # prefixed with "[Disabled] " for disabled rules. Detected here as
-        # an independent signal, combined with the column-based one below,
-        # since either could be present depending on export type/version.
+        # Panorama 11 may have no Disabled column and put "[Disabled] " in
+        # front of the name instead. Either signal disables the rule.
         $disabledFromNamePrefix = $rawName -match '^\[Disabled\]\s*'
         if ($disabledFromNamePrefix) { $namePrefixDisabledSeen = $true }
         $cleanName = $rawName -replace '^\[Disabled\]\s*', ''
 
-        # Rule names are used as the sole identifier everywhere downstream:
-        # a finding stores RuleName (not a rule ID), the report table looks
-        # up Source/Destination/Action/Profile by name, and shadow/duplicate
-        # findings reference "earlier rule 'X'" by name. If two rules
-        # genuinely share a name, every one of those becomes ambiguous - a
-        # finding for one rule could display with the other's fields. Fixed
-        # at the source here, once, rather than in each of those places
-        # separately: a repeated name gets a disambiguating suffix, so every
-        # later reference is automatically unique and correctly attributed.
+        # The name is the rule's only identifier downstream, so a repeated
+        # name gets a suffix here rather than mixing up two rules later.
         if ($seenNames.ContainsKey($cleanName)) {
             $seenNames[$cleanName]++
             $duplicateNamesSeen = $true
@@ -276,11 +202,16 @@ function Import-PaloAltoRules {
             $uniqueName = $cleanName
         }
 
-        $disabledFromColumn = if ($hasDisabledColumn) { $row.Disabled.Trim().ToLower() -eq "yes" } else { $false }
+        # A row with fewer fields than the header gets $null in the missing
+        # cells: read them as empty and say so, never drop the rule.
+        if ($null -eq $row.$lastColumn) { $shortRows += $uniqueName }
+        if (-not "$($row.Action)".Trim()) { $blankActionRows += $uniqueName }
+        $disabledFromColumn = if ($hasDisabledColumn) { "$($row.Disabled)".Trim().ToLower() -eq "yes" } else { $false }
 
         $rules += [PSCustomObject]@{
             Index       = $i
             Name        = $uniqueName
+            LocalName   = $(if ($row.Name) { $cleanName } else { "" })
             SrcZone     = Parse-ZoneField $row.'Source Zone'
             SrcAddrRaw  = $row.'Source Address'
             SrcAddr     = Parse-AddressField $row.'Source Address'
@@ -334,6 +265,12 @@ function Import-PaloAltoRules {
     if ($duplicateNamesSeen) {
         Write-Host "Note: this export has multiple rules sharing the same Name. Duplicates were renamed with a '(duplicate name #N)' suffix so each rule's findings and report row are attributed correctly." -ForegroundColor Yellow
     }
+    if ($shortRows.Count -gt 0) {
+        Write-Host "WARNING: $($shortRows.Count) row(s) have fewer fields than the header; the missing cells were read as empty (e.g. $(($shortRows | Select-Object -First 5) -join ', ')). Check the export for truncated lines." -ForegroundColor Yellow
+    }
+    if ($blankActionRows.Count -gt 0) {
+        Write-Host "WARNING: $($blankActionRows.Count) rule(s) have an empty Action and were analyzed as allow (e.g. $(($blankActionRows | Select-Object -First 5) -join ', '))." -ForegroundColor Yellow
+    }
 
     return $rules
 }
@@ -342,40 +279,24 @@ function Import-PaloAltoRules {
 # Address object / group resolution (optional, only if the CSVs are given)
 # --------------------------------------------------------------------------
 #
-# Schema below is confirmed against real exports.
-#
-#   Address Objects CSV: Name, Location, Type, Address, Tags
-#     * Type: ip-netmask | ip-range | fqdn | ip-wildcard
-#     * Address: the actual value (10.1.2.0/24, an IP range, or a hostname)
-#
-#   Address Groups CSV: Name, Location, Members Count, Addresses, Tags
-#     * No "Type" column is present in this export, so static vs. dynamic
-#       cannot be determined directly. Dynamic groups (tag-match
-#       expressions) are handled gracefully anyway: their "Addresses" value
-#       won't match any known object/group name, so it just falls through
-#       to the existing "unknown name, stays opaque" behavior below. No
-#       explicit Type check needed.
-#     * "Addresses": member object/group names, ";"-separated (same
-#       convention as multi-value fields elsewhere in these exports)
-#     * "Members Count" is used as a cross-check only: if the number of
-#       resolved members doesn't match this count, a warning is printed.
-#       This is the most likely sign that the real separator differs from
-#       ";" for your PAN-OS version.
-#
-# If your export uses different column names, this is the first place to fix.
+# Objects CSV: Name, Location, Type, Address, Tags
+# Groups CSV:  Name, Location, Members Count, Addresses, Tags
+# Groups have no Type column, so a dynamic group just doesn't resolve and
+# stays an opaque name. Members Count is only a cross-check on the ";" split.
 
 function Read-HeaderFixedCsv {
-    # Shared helper: repairs the same "blank leading column" issue handled
-    # in Import-PaloAltoRules, reused here for the objects/groups exports.
+    # Same blank-first-column fix as Import-PaloAltoRules.
     param([string]$Path)
     $fileContent = Get-CsvFileContent -Path $Path
     $fileLines = $fileContent -split "`r?`n"
 
-    $dummyHeaders = 1..20 | ForEach-Object { "Col$_" }
     $headerLineRaw = $fileLines[0]
+    $dummyHeaders = Get-DummyCsvHeaders -HeaderLine $headerLineRaw -Minimum 20
     $headerParsed = $headerLineRaw | ConvertFrom-Csv -Header $dummyHeaders
     $realHeaderNames = @($headerParsed.PSObject.Properties.Value | Where-Object { $null -ne $_ } | ForEach-Object { $_.Trim() })
-    if ($realHeaderNames.Count -gt 0 -and $realHeaderNames[0] -eq "") {
+    # Empty file: ConvertFrom-Csv won't take an empty -Header.
+    if ($realHeaderNames.Count -eq 0) { return @() }
+    if ($realHeaderNames[0] -eq "") {
         $realHeaderNames[0] = "RowNum"
     }
     return $fileContent | ConvertFrom-Csv -Header $realHeaderNames | Select-Object -Skip 1
@@ -405,13 +326,10 @@ function Import-AddressGroups {
 
     foreach ($row in (Read-HeaderFixedCsv -Path $Path)) {
         if (-not $row.Name) { continue }
-        # Real exports use "Addresses" (plural) and have no "Type" column at
-        # all. Static vs. dynamic can't be determined directly, so we don't
-        # try; see the module-level note above for why that's fine.
         $memberField = $(if ($row.Addresses) { $row.Addresses } elseif ($row.Address) { $row.Address } elseif ($row.Members) { $row.Members } else { "" })
         $members = @()
         if ($memberField) {
-            $members = @($memberField -split ";" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+            $members = @($memberField -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
         }
         $groups[$row.Name.Trim().ToLower()] = [PSCustomObject]@{
             Name      = $row.Name.Trim()
@@ -430,10 +348,8 @@ function Import-AddressGroups {
 }
 
 function Resolve-AddressToken {
-    # Recursively resolves an address-object or (static) address-group name
-    # to its real member IP(s)/CIDR(s). Plain IPs pass through unchanged.
-    # Unknown names, FQDNs, IP ranges, and dynamic groups stay as opaque
-    # (clearly labeled) tokens, exact-match only downstream, same as before.
+    # Object or group name -> its IPs, CIDRs or ranges, recursively. Names
+    # we can't turn into IPv4 (fqdn, wildcard, unknown) stay labeled tokens.
     param(
         [string]$Token,
         [hashtable]$Objects,
@@ -449,16 +365,14 @@ function Resolve-AddressToken {
 
     if ($Objects.ContainsKey($key)) {
         $obj = $Objects[$key]
-        # Real exports spell this type differently across PAN-OS versions
-        # and export tools - "ip-netmask" (the API/CLI name), "IP Netmask"
-        # (title case with a space, seen from some GUI-driven exports),
-        # etc. Normalized (lowercased, spaces collapsed to hyphens) before
-        # comparing so the object actually resolves regardless of which
-        # spelling this particular export used, instead of silently
-        # falling through to the unresolved-token case below.
+        # "ip-netmask" vs "IP Netmask" depending on the export.
         $normalizedType = ($obj.Type -replace '\s+', '-').ToLower()
         if ($normalizedType -eq "ip-netmask" -and (Test-IsPlainIP $obj.Value)) {
             return @($obj.Value)
+        }
+        # A range object becomes "a-b", same as a range typed in the rule.
+        if ($normalizedType -eq "ip-range" -and (Test-IsIpRange $obj.Value.Trim())) {
+            return @($obj.Value.Trim())
         }
         return @("$($obj.Name)[$($obj.Type)]=$($obj.Value)")
     }
@@ -472,6 +386,8 @@ function Resolve-AddressToken {
         foreach ($member in $grp.Members) {
             $resolved += Resolve-AddressToken -Token $member -Objects $Objects -Groups $Groups -Visited $Visited
         }
+        # An empty group matches nothing; an empty list would read as any.
+        if ($resolved.Count -eq 0) { return @("$($grp.Name)[empty-group]") }
         return $resolved
     }
 
@@ -486,6 +402,11 @@ function Resolve-AddressList {
     $resolved = @()
     foreach ($tok in $AddrTokens) {
         $visited = [System.Collections.Generic.HashSet[string]]::new()
+        # "[Negate] NAME": resolve the name, keep the prefix on each member.
+        if ($tok -match '^\[Negate\]\s*(.+)$') {
+            foreach ($m in (Resolve-AddressToken -Token $Matches[1].Trim() -Objects $Objects -Groups $Groups -Visited $visited)) { $resolved += "[Negate] $m" }
+            continue
+        }
         $resolved += Resolve-AddressToken -Token $tok -Objects $Objects -Groups $Groups -Visited $visited
     }
     return @($resolved | Select-Object -Unique)

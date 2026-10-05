@@ -2,12 +2,8 @@
 # IPv4/CIDR helpers
 # --------------------------------------------------------------------------
 
-# The shadow/duplicate detection loops compare every rule against every
-# earlier one (O(n^2)), so the same address string gets parsed again and
-# again across many comparisons. These three caches turn that into "parse
-# once per unique string, then instant lookups" - the single biggest cost
-# in that loop was repeatedly re-running regex matching and
-# System.Net.IPAddress parsing on strings already parsed moments before.
+# The pairwise checks see the same address strings over and over, so each
+# string is parsed once and cached. This was the biggest cost in those loops.
 $script:CidrPartsCache = @{}
 $script:Int64IPCache = @{}
 $script:IsPlainIPCache = @{}
@@ -42,7 +38,9 @@ function Test-IsPlainIP {
     if ($script:IsPlainIPCache.ContainsKey($Token)) { return $script:IsPlainIPCache[$Token] }
     $ipPart = (Get-CidrParts $Token).IP
     $parsed = $null
-    $result = [System.Net.IPAddress]::TryParse($ipPart, [ref]$parsed)
+    # Dotted IPv4 only: TryParse alone takes "2001:db8::1" as 0.0.0.1 and
+    # "10" as 0.0.0.10. Anything else is matched by name.
+    $result = ($ipPart -match '^\d{1,3}(\.\d{1,3}){3}$') -and [System.Net.IPAddress]::TryParse($ipPart, [ref]$parsed)
     $script:IsPlainIPCache[$Token] = $result
     return $result
 }
@@ -69,8 +67,7 @@ function Test-PrivateOrSpecialIP {
 }
 
 function Test-IsRfc1918Range {
-    # True if a plain CIDR or "start-end" range token falls entirely within
-    # one of the three standard RFC1918 blocks.
+    # CIDR or range entirely inside one RFC1918 block.
     param([string]$Token)
     $rfc1918Blocks = @("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 
@@ -94,42 +91,41 @@ function Test-IsRfc1918Range {
 }
 
 function Test-IsNegatedPublicPattern {
-    # True if an address field is made ENTIRELY of "[Negate] <RFC1918 range>"
-    # tokens, meaning "match anything that is NOT private", which is
-    # functionally equivalent to "any public IP" even though no single token
-    # literally says "any" or names a public CIDR. Seen in real PAN-OS
-    # exports (e.g. negating 10/8, 172.16/12, and 192.168/16 together on a
-    # rule effectively opens it to the whole internet). Easy to miss in a
-    # manual review since the field never shows "any".
-    param([array]$RawTokens)
+    # Only negated private ranges: "anything not private", i.e. any public
+    # address, without saying "any". -Strict also wants all three blocks
+    # negated; part of them is still broad, but not "any public".
+    param([array]$RawTokens, [switch]$Strict)
     if (-not $RawTokens -or $RawTokens.Count -eq 0) { return $false }
+    $inners = @()
     foreach ($tok in $RawTokens) {
         if ($tok -notmatch '^\[Negate\]\s*') { return $false }
         $inner = $tok -replace '^\[Negate\]\s*', ''
         if (-not (Test-IsRfc1918Range $inner)) { return $false }
+        $inners += $inner
+    }
+    if ($Strict) {
+        foreach ($block in @("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")) {
+            $bb = Get-AddressBounds $block
+            $covered = $false
+            foreach ($i in $inners) {
+                $ib = Get-AddressBounds $i
+                if ($ib -and $ib.Start -le $bb.Start -and $ib.End -ge $bb.End) { $covered = $true; break }
+            }
+            if (-not $covered) { return $false }
+        }
     }
     return $true
 }
 
 function Test-IsAllRfc1918Pattern {
-    # Mirror case of Test-IsNegatedPublicPattern above: instead of
-    # negating all three RFC1918 blocks together (functionally "any
-    # public"), this lists all three of them POSITIVELY together
-    # (functionally "any private"). Same real-world idiom, opposite
-    # direction - and just as easy to miss in manual review, since the
-    # field never shows "any" here either, just three specific-looking
-    # CIDRs that happen to add up to the entire private address space.
-    #
-    # Requires no token to be a [Negate] expression (that's the other
-    # function's job), and checks that SOME token fully contains each of
-    # the three canonical blocks - covers the common case of each block
-    # listed as its own token, or a broader CIDR that happens to contain
-    # one, without attempting arbitrary fragment reassembly for unusual
-    # splits that haven't been seen in a real export.
-    param([array]$RawTokens)
+    # The opposite: all three private blocks listed, i.e. any private
+    # address. Each block must sit inside one token (no piecing fragments
+    # together). -Strict: every token must be private, so 0.0.0.0/0 isn't it.
+    param([array]$RawTokens, [switch]$Strict)
     if (-not $RawTokens -or $RawTokens.Count -eq 0) { return $false }
     foreach ($tok in $RawTokens) {
         if ($tok -match '^\[Negate\]') { return $false }
+        if ($Strict -and -not (Test-IsRfc1918Range $tok)) { return $false }
     }
     $rfc1918Blocks = @("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
     foreach ($block in $rfc1918Blocks) {
@@ -146,19 +142,7 @@ function Test-IsAllRfc1918Pattern {
 }
 
 function Test-AddressFieldEffectivelyAny {
-    # Unifies the "is this address field broad" test used for counting
-    # and severity-escalation purposes (how many dimensions of a rule are
-    # wide open) across any_any_any-adjacent checks. A literal null field
-    # (parsed from "any") is the obvious case, but a field that negates
-    # all of RFC1918 or lists all of RFC1918 positively is EQUALLY broad
-    # in practice, just spelled differently - and Test-AddressTouchesInternet
-    # already treats a negation as reaching the internet for direction
-    # purposes, so a dimension-counting check that still treated the same
-    # field as "specific" would be inconsistent with its own direction
-    # classification, undercounting how open the rule actually is (e.g.
-    # failing to escalate to Critical for a rule that's exactly as open
-    # as any_any_any_allow, just using the negated-RFC1918 idiom for one
-    # field instead of the literal word "any").
+    # "any", or one of the two RFC1918 tricks above, which are just as open.
     param($RawTokens)
     if ($null -eq $RawTokens) { return $true }
     if (Test-IsNegatedPublicPattern -RawTokens $RawTokens) { return $true }
@@ -167,9 +151,7 @@ function Test-AddressFieldEffectivelyAny {
 }
 
 function Test-IsIpRange {
-    # An "IP-IP" range, e.g. "10.5.5.10-10.5.5.50". Distinct from a plain
-    # CIDR/IP (which uses "/", never "-"), so there's no ambiguity between
-    # the two syntaxes.
+    # "10.5.5.10-10.5.5.50".
     param([string]$Token)
     if ($script:IsIpRangeCache.ContainsKey($Token)) { return $script:IsIpRangeCache[$Token] }
     $result = [bool]($Token -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s*-\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
@@ -178,15 +160,9 @@ function Test-IsIpRange {
 }
 
 function Get-AddressBounds {
-    # Returns a Start/End Int64 pair for any token expressible as one
-    # contiguous numeric interval: a plain CIDR/IP (network address to
-    # broadcast address) or an "IP-IP" range (both ends parsed directly).
-    # Returns $null for anything else - a "[Negate] X" expression isn't a
-    # single contiguous interval in general (it's everything EXCEPT X,
-    # which splits into zero, one, or two remaining intervals depending on
-    # where X sits), and an unresolved address-object name has no interval
-    # at all without its definition. Both still fall back to exact string
-    # matching in the callers below, same as before this function existed.
+    # Start/End integers for a CIDR or a range. $null for anything else (a
+    # negation isn't one interval, a name has none); callers then compare
+    # the text.
     param([string]$Token)
     if ($script:AddressBoundsCache.ContainsKey($Token)) { return $script:AddressBoundsCache[$Token] }
     $result = $null
@@ -219,15 +195,9 @@ function Test-IntervalsOverlap {
 }
 
 function Test-NarrowerAvoidsNegatedSet {
-    # For a Broader address list made ENTIRELY of "[Negate] X" tokens -
-    # which combine with AND semantics (matches only if it avoids EVERY
-    # excluded X, same assumption Test-IsNegatedPublicPattern above
-    # already makes for the all-RFC1918 case), a single-interval Narrower
-    # token is covered if it has zero overlap with each excluded X. Only
-    # handles a Narrower with computable bounds (a plain CIDR/range): a
-    # Narrower that's itself a "[Negate]" expression isn't attempted here,
-    # since that combination is rare enough in practice not to be worth
-    # the added complexity right now.
+    # Negations combine with AND: the narrower interval is covered if it
+    # touches none of the excluded ranges. A negated narrower side isn't
+    # handled (rare).
     param([array]$NegatedBroaderRawTokens, $NarrowerBounds)
     foreach ($bTok in $NegatedBroaderRawTokens) {
         $inner = $bTok -replace '^\[Negate\]\s*', ''
@@ -243,10 +213,7 @@ function Test-NetworksContain {
     if ($null -eq $Broader) { return $true }
     if ($null -eq $Narrower) { return $false }
 
-    # Broader made entirely of "[Negate] X" tokens combines with AND
-    # semantics, unlike the OR semantics that governs a normal multi-value
-    # list, so it can't go through the same per-token "any one match is
-    # enough" loop below.
+    # All negations means AND, not the usual OR of a list.
     $allNegated = $Broader.Count -gt 0 -and (@($Broader | Where-Object { $_ -notmatch '^\[Negate\]' })).Count -eq 0
     if ($allNegated) {
         foreach ($nTok in $Narrower) {
@@ -274,13 +241,7 @@ function Test-NetworksContain {
 }
 
 function ConvertTo-ParsedAddressList {
-    # Pre-parses an address token list ONCE into a fast-comparison form.
-    # The shadow/duplicate detection loops compare every rule against every
-    # earlier one, so the same rule's own address gets looked at again on
-    # every comparison it takes part in - up to n-1 times. Parsing it once
-    # up front and comparing pre-parsed Start/End integers in the loop
-    # itself (see Test-NetworksContainFast) avoids re-running regex
-    # matching and IPAddress parsing that many times over.
+    # Parse once, so the pairwise loops only compare integers.
     param($AddrTokens)
     if ($null -eq $AddrTokens) { return $null }
     $parsed = foreach ($tok in $AddrTokens) {
@@ -296,28 +257,17 @@ function ConvertTo-ParsedAddressList {
 }
 
 function Test-NetworksContainFast {
-    # Same semantics as Test-NetworksContain, but takes address lists
-    # already pre-parsed by ConvertTo-ParsedAddressList, so no parsing
-    # happens inside the O(n^2) comparison loop itself, just integer
-    # comparisons. Covers plain CIDR/IP and "IP-IP" ranges uniformly
-    # (both reduce to a Start/End interval); anything else falls back to
-    # exact string matching, same as it always has.
+    # Test-NetworksContain on pre-parsed lists.
     param($Broader, $Narrower)
     if ($null -eq $Broader) { return $true }
     if ($null -eq $Narrower) { return $false }
 
-    # Broader made entirely of "[Negate] X" tokens combines with AND
-    # semantics (matches only if it avoids EVERY excluded X), unlike the
-    # OR semantics of a normal multi-value list, so it needs handling
-    # separately from the per-token loop below, which assumes OR.
+    # All negations means AND, not the usual OR of a list.
     $allNegated = $Broader.Count -gt 0 -and (@($Broader | Where-Object { $_.Raw -notmatch '^\[Negate\]' })).Count -eq 0
     if ($allNegated) {
         $negatedRaw = $Broader | ForEach-Object { $_.Raw }
         foreach ($n in $Narrower) {
-            # Exact match first: two rules using the identical negation
-            # expression are still "the same address" for duplicate/shadow
-            # purposes, regardless of the interval math below (which only
-            # handles a Narrower with its own computable bounds).
+            # The same negation on both sides is the same address.
             if ($negatedRaw -contains $n.Raw) { continue }
             if (-not $n.HasBounds) { return $false }
             $nBounds = [PSCustomObject]@{ Start = $n.Start; End = $n.End }
@@ -350,23 +300,9 @@ function Test-ListContains {
 }
 
 function Test-NetworksOverlapFast {
-    # Genuine set INTERSECTION, not the containment tested by
-    # Test-NetworksContainFast above. Needed for the Correlation anomaly
-    # check, which looks for two rules whose traffic partially overlaps
-    # without either one containing the other - containment alone can't
-    # tell that case apart from Shadow/Generalization (both of which are
-    # full containment in one direction).
-    #
-    # Same pre-parsed {HasBounds, Start, End, Raw} shape as
-    # Test-NetworksContainFast. Negated ("[Negate] X") tokens are handled
-    # conservatively rather than with the same AND-semantics precision
-    # used there: a list made entirely of negated tokens is treated as
-    # overlapping with anything (a negation carves one range out of
-    # "everything else", so in practice it overlaps almost any other real
-    # range). That can occasionally over-flag a Correlation pair that
-    # doesn't truly overlap once the exclusion is taken into account, but
-    # this is a Low-severity warning finding, and missing a genuine
-    # correlation would be the worse failure mode of the two.
+    # Any overlap at all (for the correlation check). A list of negations
+    # is assumed to overlap everything: it may over-report a Low finding,
+    # which beats missing one.
     param($A, $B)
     if ($null -eq $A -or $null -eq $B) { return $true }
     if ($A.Count -eq 0 -or $B.Count -eq 0) { return $true }
@@ -387,10 +323,7 @@ function Test-NetworksOverlapFast {
 }
 
 function Test-ListsOverlap {
-    # Same idea as Test-NetworksOverlapFast, for the exact-string Application
-    # and Service lists (Test-ListContains' non-CIDR counterpart): true if
-    # the two lists share at least one value, or either is $null (meaning
-    # "any", which overlaps everything).
+    # Applications / services: one value in common, or either side any.
     param($A, $B)
     if ($null -eq $A -or $null -eq $B) { return $true }
     foreach ($item in $A) {

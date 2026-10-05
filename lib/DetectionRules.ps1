@@ -1,8 +1,6 @@
 # --------------------------------------------------------------------------
-# Detection rules: risky ports/apps data, internet/critical-zone helpers,
-# and the actual finding logic (Invoke-DeterministicChecks). This is the file
-# to edit when adding or tuning a check. Everything else (parsing, reporting)
-# lives elsewhere.
+# Detection rules: the risky port / app lists, the zone helpers and every
+# check (Invoke-DeterministicChecks). Edit this file to add or tune a check.
 # --------------------------------------------------------------------------
 
 $RiskyPorts = @{
@@ -14,26 +12,14 @@ $RiskyPorts = @{
     9200 = "Elasticsearch"; 27017 = "MongoDB"
 }
 
-# Ports that are unencrypted/cleartext by design (as opposed to "just risky
-# because it's a management/admin surface", e.g. SSH/RDP are encrypted but
-# still worth flagging as high-value targets). Used only to annotate findings.
+# Cleartext by design (SSH and RDP are risky but encrypted). Only used to
+# add a note to the finding text.
 $CleartextPorts = @(20, 21, 23, 25, 69, 80, 110, 143, 161, 389, 512, 513, 514)
 
-# Well-known public DNS resolvers. Traffic reaching one of these directly
-# bypasses internal/corporate DNS, which matters regardless of whether the
-# specific protocol is plain DNS, DoT (port 853), or DoH (usually
-# indistinguishable from ordinary HTTPS at the port level, since it rides
-# over 443. This is why DoH gets checked by destination here rather than
-# by port the way the other risky protocols are).
-#
-# Sourced from https://dnsprivacy.org/public_resolvers/ plus a handful of
-# other big, recognizable providers with stable published anycast IPs,
-# cross-checked against their own sites. Deliberately does not include the
-# long tail of smaller/personal DNSCrypt and DoH operators (e.g. the full
-# https://github.com/DNSCrypt/dnscrypt-resolvers list runs to hundreds of
-# entries): the value of this check is flagging traffic to a provider a
-# reviewer would immediately recognize as a real bypass, not accumulating
-# every obscure resolver that could theoretically match.
+# Big public DNS resolvers. Reaching one directly bypasses corporate DNS,
+# whatever the protocol; DoH looks like plain HTTPS, which is why we go by
+# destination here. From dnsprivacy.org plus a few well-known providers;
+# the long tail of small resolvers is left out on purpose.
 $KnownPublicDnsResolvers = @(
     "8.8.8.8", "8.8.4.4",                     # Google
     "1.1.1.1", "1.0.0.1",                     # Cloudflare
@@ -48,15 +34,10 @@ $KnownPublicDnsResolvers = @(
     "77.88.8.8", "77.88.8.1"                  # Yandex DNS
 )
 
-# Best-effort App-ID name -> label mapping. Verify against your own App-ID
-# database. Names can be renamed/added across content-pack updates. The
-# entries for legacy r-commands, PPTP, and the "often left with no auth"
-# modern data-store apps (redis/mongodb/elasticsearch/postgres) are lower
-# confidence guesses. Check these especially carefully against your tenant.
-# "anydesk" and "dns-over-https" are confirmed against a real PAN-OS
-# export; the other remote-access tool names (teamviewer, logmein,
-# splashtop, chrome-remote-desktop) follow the same naming pattern but
-# haven't been individually confirmed the same way.
+# Best-effort App-ID names; check them against your App-ID database. The
+# r-commands, PPTP and the data stores are the least certain. anydesk and
+# dns-over-https were seen in a real export; the other remote access names
+# follow the same pattern but weren't confirmed one by one.
 $RiskyApplications = @{
     "ftp" = "FTP"; "ssh" = "SSH"; "telnet" = "Telnet"; "smtp" = "SMTP"
     "tftp" = "TFTP"; "pop3" = "POP3"; "imap" = "IMAP"; "snmp" = "SNMP"
@@ -69,55 +50,29 @@ $RiskyApplications = @{
     "dns-over-https" = "DNS over HTTPS"
 }
 
-# Protocols historically abused for UDP reflection/amplification DDoS
-# attacks against THIRD PARTIES: a server that answers one of these from
-# the unrestricted internet can be tricked into bouncing a large response
-# at a spoofed victim address, since UDP has no handshake to verify the
-# source actually asked for anything. This is a different risk framing
-# from $RiskyPorts/$RiskyApplications above (there, the concern is THIS
-# network being compromised); here the concern is this firewall's own
-# infrastructure being weaponized against someone else. Deliberately
-# excludes ports/apps already covered above (SNMP/161, LDAP/389) so the
-# same rule doesn't get a near-duplicate finding under two Types - those
-# already get flagged, just under the direct-exposure framing instead.
-#
-# UDP transport specifically matters here (TCP's three-way handshake rules
-# out the classic spoofed-source technique), which is why the port check
-# below uses Get-ServiceUdpPorts rather than the transport-agnostic
-# Get-ServicePorts used elsewhere in this file.
+# UDP services used for reflection / amplification DDoS: the victim is a
+# third party, not this network. UDP only, since the spoofing needs no
+# handshake. SNMP and LDAP are left out because the risky port list above
+# already flags them.
 $AmplificationPronePorts = @{
     17 = "QOTD"; 19 = "Chargen"; 123 = "NTP"; 137 = "NetBIOS Name Service"
     1900 = "SSDP/UPnP"; 5353 = "mDNS"; 11211 = "Memcached"
 }
 
-# App-ID names, checked alongside the port list above for rules that use
-# application-default rather than naming the raw port. Kept deliberately
-# short: only names reasonably confident to exist as their own distinct
-# App-ID rather than falling under a generic unknown-udp classification.
-# Verify against your own App-ID database, same caveat as
-# $RiskyApplications above.
+# The same services by App-ID, for rules using application-default. Short
+# on purpose: only names we're fairly sure exist.
 $AmplificationProneApplications = @{
     "ntp" = "NTP"; "ssdp" = "SSDP/UPnP"; "netbios-ns" = "NetBIOS Name Service"
 }
 
 function Merge-CustomRiskyTaxonomy {
-    # Extends (never replaces) the built-in risky-port/application tables
-    # above with entries from a user-supplied JSON file, so an
-    # environment-specific port or App-ID name doesn't require editing
-    # this script directly. A custom entry sharing a key with a built-in
-    # one overrides just that entry's label, everything else built-in
-    # stays. Expected shape:
+    # Adds entries from a JSON file to the lists above (a same key just
+    # changes the label). All keys are optional:
     # { "riskyPorts": {"31337": "Custom-Backdoor"}, "cleartextPorts": [31337],
     #   "riskyApplications": {"internal-legacy-app": "Custom Legacy Protocol"},
     #   "amplificationPronePorts": {"20000": "Custom-UDP-Service"},
     #   "amplificationProneApplications": {"internal-udp-app": "Custom UDP Service"} }
-    # All five top-level keys are optional; an empty or absent one simply
-    # contributes nothing. Modifies the script-scoped $RiskyPorts,
-    # $CleartextPorts, $RiskyApplications, $AmplificationPronePorts, and
-    # $AmplificationProneApplications variables from the caller's scope in
-    # place (hashtables/arrays are reference types in PowerShell, so this
-    # works without an explicit scope modifier as long as the variables
-    # themselves are never reassigned wholesale here).
+    # The hashtables are changed in place, so don't reassign them here.
     param([string]$Path)
     if (-not (Test-Path $Path)) {
         Write-Host "WARNING: Risky taxonomy file not found at '$Path'. Continuing with built-in defaults only." -ForegroundColor Yellow
@@ -194,51 +149,60 @@ function Merge-CustomRiskyTaxonomy {
 # --------------------------------------------------------------------------
 
 
+function Test-ZoneNameInSet {
+    # Importers write a zone that exists in several VDOMs / logical systems as
+    # "<scope>/<zone>"; the plain zone name given on the command line still
+    # matches it.
+    param([string]$ZoneLower, [array]$ZoneSet)
+    if ($ZoneSet -contains $ZoneLower) { return $true }
+    $slash = $ZoneLower.LastIndexOf('/')
+    return ($slash -ge 0 -and $ZoneSet -contains $ZoneLower.Substring($slash + 1))
+}
+
+function Get-ActionClass {
+    # PAN-OS blocks with deny, drop and reset-*; other vendors are imported
+    # as allow / deny already.
+    param([string]$Action)
+    if ("$Action".Trim().ToLower() -eq 'allow') { return 'allow' }
+    return 'deny'
+}
+
+function Get-RuleLocalName {
+    # The name as written on the device, without the "<device>/", "<vdom>/"
+    # or duplicate-name additions. Empty when the rule has no name at all.
+    param($Rule)
+    if ($Rule.PSObject.Properties['LocalName']) { return "$($Rule.LocalName)" }
+    return "$($Rule.Name)"
+}
+
 function Test-ZoneTouchesInternet {
     param([array]$Zones, [array]$InternetZoneSet)
-    # $script:AnyZoneImpliesInternet is computed once at the top of
-    # Invoke-DeterministicChecks (see the comment there). Defaults to
-    # $true when unset - e.g. this function called before that
-    # computation runs, or from a context that never sets it - the
-    # historical, more permissive behavior, so nothing regresses for a
-    # caller that hasn't opted into this check.
+    # Set by Invoke-DeterministicChecks; when it isn't, "any" counts as
+    # internet, the old behavior.
     $anyImpliesInternet = if (Get-Variable -Name AnyZoneImpliesInternet -Scope Script -ErrorAction SilentlyContinue) { $script:AnyZoneImpliesInternet } else { $true }
     foreach ($z in $Zones) {
         $zl = $z.Trim().ToLower()
-        if ($InternetZoneSet -contains $zl) { return $true }
+        if (Test-ZoneNameInSet $zl $InternetZoneSet) { return $true }
         if ($zl -eq "any" -and $anyImpliesInternet) { return $true }
     }
     return $false
 }
 
 function Test-ZoneIsNamedInternetZone {
-    # Same as Test-ZoneTouchesInternet but excludes the "any" case: true
-    # only for a specifically named internet-facing zone (Untrust, outside,
-    # etc.), not for a zone that merely could include internet because it's
-    # set to "any". Used to tell apart concrete evidence of direction from
-    # the weaker, direction-neutral "any" signal.
+    # Like Test-ZoneTouchesInternet but "any" doesn't count: only a zone
+    # actually named as internet facing. Firmer evidence of direction.
     param([array]$Zones, [array]$InternetZoneSet)
     foreach ($z in $Zones) {
         $zl = $z.Trim().ToLower()
-        if ($InternetZoneSet -contains $zl) { return $true }
+        if (Test-ZoneNameInSet $zl $InternetZoneSet) { return $true }
     }
     return $false
 }
 
 function Test-ServiceNameImpliesRiskyApp {
-    # A custom-named Service object can be named exactly after the risky
-    # app/protocol ("smtp"), or have a port or other suffix appended to
-    # that name ("smtp-25", "SMTP_Relay_25") - a naming style seen on
-    # real, pre-App-ID-era rulebases. Checked two ways: the whole token
-    # against the risky-app dictionary first (catches both a bare name
-    # and a hyphenated App-ID name like "ms-rdp" used as-is), then each
-    # individual sub-token split on the same separators used elsewhere in
-    # this file for name matching (catches a simple name with a port/
-    # suffix appended, like "smtp-25"). This deliberately won't catch a
-    # hyphenated App-ID name with a port ALSO appended (e.g.
-    # "ms-rdp-3389") - a real but much rarer combination that would need
-    # sub-sequence matching, not worth the added complexity for how
-    # infrequently it's likely to come up.
+    # Old rulebases name service objects after the protocol: "smtp",
+    # "smtp-25", "SMTP_Relay_25". Try the whole name, then each piece.
+    # "ms-rdp-3389" slips through; rare enough to live with.
     param([string]$ServiceToken, [hashtable]$RiskyApplications)
     if ($RiskyApplications.ContainsKey($ServiceToken)) { return $ServiceToken }
     $subTokens = @($ServiceToken -split '[-_\s\.]+' | Where-Object { $_ -ne "" })
@@ -249,25 +213,16 @@ function Test-ServiceNameImpliesRiskyApp {
 }
 
 function Test-ServiceEffectivelyAny {
-    # "application-default" isn't literally "any" in the Service field, but
-    # when Application is ALSO "any" it places no real restriction on the
-    # traffic - it just means "whichever app matches, on that app's normal
-    # port", and the app itself is unrestricted. Treating this combination
-    # as equivalent to Service: any avoids under-counting how open a rule
-    # really is just because Service happens to say the (very common)
-    # default value rather than the literal word "any".
+    # application-default with Application any restricts nothing, so it
+    # counts as Service any.
     param($ParsedService, $Application, [string]$ServiceRaw)
     if ($null -eq $ParsedService) { return $true }
     return ($null -eq $Application) -and $ServiceRaw -and ($ServiceRaw.Trim().ToLower() -eq "application-default")
 }
 
 function Get-KnownDnsResolverMatches {
-    # Returns ALL known public DNS resolver IPs found in an address field
-    # (as an array), not just the first one. A field like "8.8.8.8;1.1.1.1"
-    # legitimately contains two different known resolvers; reporting only
-    # the first one silently drops the other from the finding text.
-    # Checked as a literal IP match after stripping any CIDR suffix, since
-    # a resolver would typically appear as a /32 or bare IP.
+    # Every known resolver in the field, not just the first. Exact IP match,
+    # ignoring a /32.
     param($AddrTokens)
     if (-not $AddrTokens) { return @() }
     $matches = foreach ($tok in $AddrTokens) {
@@ -278,23 +233,19 @@ function Get-KnownDnsResolverMatches {
 }
 
 function Test-ZoneInSet {
-    # Generic version of Test-ZoneTouchesInternet for an arbitrary named zone
-    # set (e.g. critical/crown-jewel zones), without the "any" auto-match -
-    # a rule scoped to "any" zone isn't automatically "in" a specific named
-    # critical zone the way it's automatically internet-facing.
+    # For any zone list (critical zones). Unlike the internet test, "any"
+    # doesn't match.
     param([array]$Zones, [array]$ZoneSet)
     if (-not $ZoneSet -or $ZoneSet.Count -eq 0) { return $false }
     foreach ($z in $Zones) {
-        if ($ZoneSet -contains $z.Trim().ToLower()) { return $true }
+        if (Test-ZoneNameInSet $z.Trim().ToLower() $ZoneSet) { return $true }
     }
     return $false
 }
 
 function Test-ZonesCoveredFast {
-    # Same semantics as Test-ZonesCovered, but both inputs are already
-    # lowercased (see the pre-computation before the O(n^2) loops below),
-    # avoiding a fresh ToLower() pipeline pass on every comparison a rule's
-    # zones take part in.
+    # Does Earlier cover Later? Inputs are already lowercased, which matters
+    # inside the pairwise loops.
     param([array]$EarlierLower, [array]$LaterLower)
     if ($EarlierLower -contains "any") { return $true }
     foreach ($z in $LaterLower) {
@@ -304,17 +255,13 @@ function Test-ZonesCoveredFast {
 }
 
 function Test-ZonesEqualFast {
-    # Same semantics as Test-ZonesEqual, but both inputs are already
-    # lowercased.
+    # Same zones both ways. Lowercased input.
     param([array]$ALower, [array]$BLower)
     return (Test-ZonesCoveredFast -EarlierLower $ALower -LaterLower $BLower) -and (Test-ZonesCoveredFast -EarlierLower $BLower -LaterLower $ALower) -and (-not ($ALower -contains "any" -and -not ($BLower -contains "any"))) -and (-not ($BLower -contains "any" -and -not ($ALower -contains "any")))
 }
 
 function Test-ZonesOverlapFast {
-    # Genuine set intersection, not the containment tested by
-    # Test-ZonesCoveredFast above. Needed for the Correlation anomaly
-    # check, which looks for rules whose zones share at least one common
-    # value without one side necessarily covering the other outright.
+    # At least one zone in common (for the correlation check).
     param([array]$ALower, [array]$BLower)
     if ($ALower -contains "any" -or $BLower -contains "any") { return $true }
     foreach ($z in $ALower) {
@@ -324,30 +271,10 @@ function Test-ZonesOverlapFast {
 }
 
 function Test-AddressTouchesInternet {
-    # "any" address does not by itself count as "touches the internet" -
-    # that case is handled by zone="any" in Test-ZoneTouchesInternet. A rule
-    # scoped to an explicit internal zone (e.g. Trust) with an unrestricted
-    # address field is still internal. Only a concrete, non-private IP
-    # literal counts as a real internet signal here.
-    #
-    # A "[Negate] X" token is also treated as touching the internet
-    # regardless of what X specifically is, not just the narrow "negates
-    # all three RFC1918 ranges together" pattern (see
-    # Test-IsNegatedPublicPattern, still used for the dedicated
-    # negated_rfc1918_effectively_public finding and its specific wording).
-    # Excluding any single bounded range, however it's chosen, still
-    # matches everything else - both private space AND the overwhelming
-    # majority of public IP space. A rule negating one arbitrary /24 is
-    # still reachable from virtually the entire internet; it just wasn't
-    # written as the specific "any-public" idiom this script already knew
-    # to recognize.
-    #
-    # This intentionally counts a negation as "touches the internet" for
-    # risk-detection purposes (used by inbound_risky_*, no_security_profile,
-    # internet_exposed_any_field, etc.), where being permissive is correct:
-    # the address genuinely could be public, and that's worth flagging. It
-    # is deliberately NOT used for direction classification - see
-    # Test-AddressIsExclusivelyPublic below for why that needs a stricter bar.
+    # A public IP counts, and so does any "[Negate] X": excluding one range
+    # still leaves most of the internet in. An "any" address doesn't count by
+    # itself (the zone decides that). Used for findings, not for direction,
+    # which needs firmer evidence (see the next function).
     param($AddrTokens)
     if ($null -eq $AddrTokens) { return $false }
     foreach ($tok in $AddrTokens) {
@@ -360,19 +287,8 @@ function Test-AddressTouchesInternet {
 }
 
 function Test-AddressIsExclusivelyPublic {
-    # Stricter than Test-AddressTouchesInternet above, used only for
-    # Inbound/Outbound/Both-sides direction labeling, not risk detection.
-    # A literal public IP/CIDR (e.g. 80.23.3.3) can ONLY be an internet
-    # address - that's unambiguous, definite evidence of direction. A
-    # "[Negate] X" token is different: excluding one range still leaves in
-    # ALL of RFC1918 private space too, so the address could just as
-    # easily be an internal host (e.g. 10.200.60.1) as a public one - it's
-    # broad evidence of possible exposure (correctly caught above for
-    # findings), but not proof of which direction traffic actually flows.
-    # Counting it as "definite" here would wrongly let one strong signal on
-    # this side silently outrank the other side's genuine, if weaker,
-    # internet-touching evidence (e.g. a "Destination Zone: any" that could
-    # equally mean this rule permits outbound just as much as inbound).
+    # For the direction label only: a literal public IP is proof, a negation
+    # isn't (it still includes private space too).
     param($AddrTokens)
     if ($null -eq $AddrTokens) { return $false }
     foreach ($tok in $AddrTokens) {
@@ -384,21 +300,9 @@ function Test-AddressIsExclusivelyPublic {
 }
 
 function Test-AddressIsExclusivelyPrivate {
-    # The mirror check to Test-AddressIsExclusivelyPublic above: true only
-    # when EVERY token in the address field is a plain (non-negated) IP/
-    # CIDR that resolves to private/special IP space, and there's at
-    # least one token - null/any doesn't count, it doesn't narrow
-    # anything. Used to override a zone="any" signal in Test-SideIsInternet
-    # below: PAN-OS matches zone AND address together on a rule, not
-    # either alone, so a rule scoped to zone="any" but an address field
-    # that's exclusively a specific private host can never actually be
-    # reached from the real internet, no matter how broad the zone field
-    # looks in isolation. Kept deliberately conservative: an IP range, an
-    # unresolved address-object name, or anything mixed with even one
-    # non-private token falls through to the old, safer-if-imprecise
-    # behavior rather than risk suppressing a genuine finding on
-    # something this function isn't confident enough to call
-    # "exclusively private."
+    # True only if every token is a plain private IP/CIDR. Lets a private
+    # address override a zone of "any" (zone and address must both match).
+    # Ranges, names or anything mixed: false, to be on the safe side.
     param($AddrTokens)
     if ($null -eq $AddrTokens -or $AddrTokens.Count -eq 0) { return $false }
     foreach ($tok in $AddrTokens) {
@@ -410,20 +314,8 @@ function Test-AddressIsExclusivelyPrivate {
 }
 
 function Test-SideIsInternet {
-    # A specifically-named internet zone (e.g. Untrust) is trusted as-is
-    # regardless of the address field - which interface traffic arrives
-    # on is a deliberate signal an address shouldn't override. But
-    # zone="any" carries no such deliberate signal by itself; it's only
-    # "internet-touching" because it's broad enough to also include
-    # internet-facing zones among everything else it matches. If the
-    # address field is exclusively, explicitly private, PAN-OS's
-    # AND-across-fields matching means this rule can only ever match that
-    # specific private host regardless of which zone the traffic arrives
-    # on - so it can never actually be reached from the real internet,
-    # and zone="any" alone isn't enough to call this side
-    # internet-touching in that case. A real public IP or a [Negate]
-    # token on the address side is unaffected by this and still counts
-    # normally (see Test-AddressTouchesInternet).
+    # A named internet zone always counts. A zone of "any" counts unless
+    # the address is strictly private.
     param([array]$Zones, $AddrTokens, [array]$InternetZoneSet)
     if (Test-ZoneIsNamedInternetZone -Zones $Zones -InternetZoneSet $InternetZoneSet) { return $true }
     if (Test-AddressTouchesInternet -AddrTokens $AddrTokens) { return $true }
@@ -436,47 +328,33 @@ function Test-SideIsInternet {
 # --------------------------------------------------------------------------
 
 
+function Get-AppIdLabel {
+    # "App-ID" is Palo Alto's word; other vendors get "application".
+    param($Rule)
+    if ($Rule.Vendor -and $Rule.Vendor -ne 'paloalto') { return 'application' }
+    return 'App-ID'
+}
+
 function Invoke-DeterministicChecks {
-    param([array]$Rules, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25)
+    # VendorContext is $null for a PAN-OS CSV. Importers pass the vendor and
+    # the zones where same-zone traffic passes with no rule.
+    param([array]$Rules, [array]$InternetZoneSet, [array]$CriticalZoneSet, [int]$StaleHitDays = 365, [int]$MaxAddressListSize = 25, [hashtable]$VendorContext = $null, [switch]$SkipSecurityProfileCheck)
     $findings = @()
 
-    # Computed once, not per-rule: does at least one zone actually used
-    # anywhere in this ruleset match a configured internet zone name? On a
-    # purely internal firewall (no Untrust/external-equivalent interface
-    # exists on the device at all), the answer is no - and in that case,
-    # zone="any" matching "every zone the firewall knows about" can never
-    # include the internet, because none of those zones IS the internet.
-    # Treating zone="any" as internet-touching regardless (the historical
-    # behavior) made sense as a default assuming SOME internet-facing zone
-    # probably exists somewhere in the ruleset, but produces a flood of
-    # false "touches the internet" findings on a ruleset where that
-    # assumption is simply false. Read by Test-ZoneTouchesInternet below;
-    # a real, concrete public/negated address is unaffected either way,
-    # since that's evidence independent of zone naming entirely.
+    # On a purely internal firewall (no zone in the ruleset is an internet
+    # zone) "any" can't include the internet, so don't treat it as such.
     $script:AnyZoneImpliesInternet = $false
     foreach ($rule in $Rules) {
         foreach ($z in (@($rule.SrcZone) + @($rule.DstZone))) {
-            if ($InternetZoneSet -contains $z.Trim().ToLower()) { $script:AnyZoneImpliesInternet = $true; break }
+            if (Test-ZoneNameInSet $z.Trim().ToLower() $InternetZoneSet) { $script:AnyZoneImpliesInternet = $true; break }
         }
         if ($script:AnyZoneImpliesInternet) { break }
     }
 
-    # Computed once, not per-rule: does the Options column actually carry
-    # logging information anywhere in this ruleset? Some export types
-    # include the column but never populate it with logging detail at all,
-    # which would make every single rule look "unlogged" if checked
-    # naively. Confirming at least one real example exists first avoids
-    # that false-positive flood.
-    #
-    # Logging and forwarding are two genuinely separate PAN-OS settings:
-    # "Log at Session Start"/"Log at Session End" control whether a log
-    # entry is created AT ALL (stored locally on the firewall regardless
-    # of anything else), while a Log Forwarding profile only controls
-    # whether those already-created local logs also get sent to Panorama
-    # or an external destination. A rule with logging on but no forwarding
-    # profile still has a real, locally-queryable audit trail, so either
-    # signal alone is enough here: this check is about "does a record of
-    # this traffic exist anywhere," not "is it centralized."
+    # Some exports have an Options column that never mentions logging; then
+    # every rule would look unlogged. Only run the logging checks if at
+    # least one rule shows logging. Session start/end logging or a forwarding
+    # profile each count: either way a record of the traffic exists.
     $loggingPattern = "session start|session end"
     $forwardingPattern = "log forwarding"
     $anyRuleShowsLogging = $false
@@ -502,56 +380,35 @@ function Invoke-DeterministicChecks {
             }
             continue
         }
-        # A rule named as if it denies/blocks something but is actually
-        # configured to allow it (or vice versa) is a dangerous, easy
-        # mistake to miss on a quick read: whoever reviews the ruleset
-        # later sees "DENY_..." and reasonably assumes that traffic is
-        # blocked, when it's actually permitted. Checked here, BEFORE the
-        # action=allow gate below, since it's the one check in this
-        # function that specifically needs to see deny/drop rules too -
-        # everything after this gate assumes allow.
-        #
-        # Matched by exact token (same tokenization as the temp/POC check
-        # further down), not raw substring, to avoid a false positive on
-        # a name that merely contains one of these words as part of a
-        # longer word. Rules where the name contains BOTH a deny-style and
-        # an allow-style token are skipped rather than guessed at, since
-        # the naming intent itself is ambiguous there, not clearly
-        # contradicted.
-        $nameTokensForAction = @($rule.Name -split '[-_\s\.]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
+        # A "DENY_..." rule that actually allows (or the other way round) is
+        # easy to misread. Runs before the allow-only part below because it
+        # needs deny rules too. Whole words only; names with both kinds of
+        # word are skipped as ambiguous.
+        $localName = Get-RuleLocalName $rule
+        $nameTokensForAction = @($localName -split '[-_\s\.]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
         $denyIntentWords = @("deny", "block", "drop", "reject")
         $allowIntentWords = @("allow", "permit", "accept")
         $hasDenyIntent = ($denyIntentWords | Where-Object { $nameTokensForAction -contains $_ }).Count -gt 0
         $hasAllowIntent = ($allowIntentWords | Where-Object { $nameTokensForAction -contains $_ }).Count -gt 0
-        $actionLowerForName = $rule.Action.ToLower()
+        $actionLowerForName = Get-ActionClass $rule.Action
         if ($hasDenyIntent -and -not $hasAllowIntent -and $actionLowerForName -eq "allow") {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "rule_name_action_mismatch"
                 Detail   = "Rule name suggests it denies/blocks traffic, but Action is actually '$($rule.Action)'. Anyone reading the ruleset by name alone would reasonably assume this traffic is blocked when it isn't. Verify whether the name is stale (rule was toggled without renaming) or the action was set incorrectly."
             }
         }
-        elseif ($hasAllowIntent -and -not $hasDenyIntent -and ($actionLowerForName -eq "deny" -or $actionLowerForName -eq "drop")) {
+        elseif ($hasAllowIntent -and -not $hasDenyIntent -and $actionLowerForName -eq "deny") {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "rule_name_action_mismatch"
                 Detail   = "Rule name suggests it allows/permits traffic, but Action is actually '$($rule.Action)'. Anyone reading the ruleset by name alone would reasonably assume this traffic is permitted when it isn't. Verify whether the name is stale (rule was toggled without renaming) or the action was set incorrectly."
             }
         }
 
-        # A rule name that reveals nothing about its purpose (a GUI default,
-        # a copy-paste artifact, a bare number) is a hygiene gap distinct
-        # from the temporary/POC/test signal checked further down: this
-        # isn't about a rule that LOOKS temporary, it's about one that
-        # gives a reviewer no information at all about what it controls,
-        # forcing them to reconstruct intent from the match criteria alone
-        # every time it comes up in an audit or a cleanup pass. Matched
-        # against the WHOLE trimmed name, not tokenized: these are
-        # placeholder-style names taken as a whole, not names that merely
-        # contain one of these words as part of something longer.
-        # "regola" (Italian for "rule") is included alongside the English
-        # defaults, since PAN-OS/Panorama exports and GUIs are sometimes
-        # localized.
-        $trimmedRuleName = $rule.Name.Trim()
-        $isGenericName = ($trimmedRuleName -match '(?i)^(rule|regola|policy|security\s*rule|new\s*rule|allow|deny|untitled|unnamed|default|sample|example)\s*#?\s*\d*$') -or ($trimmedRuleName -match '^\d+$')
+        # Names that say nothing ("Rule 5", "New Rule", "12"). The whole name
+        # must match, "regola" included for Italian GUIs. Underscores count
+        # as spaces because SRX names can't have spaces.
+        $trimmedRuleName = $localName.Trim()
+        $isGenericName = ($trimmedRuleName -match '(?i)^(rule|regola|policy|security[\s_]*rule|new[\s_]*rule|allow|deny|untitled|unnamed|default|sample|example)[\s_]*#?[\s_]*\d*$') -or ($trimmedRuleName -match '^\d+$')
         if ($isGenericName) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Low"; Type = "generic_rule_name"
@@ -564,12 +421,7 @@ function Invoke-DeterministicChecks {
         $srcIsInet = Test-SideIsInternet -Zones $rule.SrcZone -AddrTokens $rule.SrcAddr -InternetZoneSet $InternetZoneSet
         $dstIsInet = Test-SideIsInternet -Zones $rule.DstZone -AddrTokens $rule.DstAddr -InternetZoneSet $InternetZoneSet
 
-        # A source scoped to a NAMED internet-facing zone (e.g. "outside")
-        # is functionally just as open as a literal "any" source zone -
-        # both mean "anyone reachable from that zone", which for an
-        # internet-facing zone means anyone on the internet. Checking only
-        # for the literal string "any" would miss a rule that's otherwise
-        # exactly this broad just because the zone has a specific name.
+        # A named internet zone as source is as open as "any".
         $srcZoneFullyOpen = ($rule.SrcZone -contains "any") -or (Test-ZoneTouchesInternet -Zones $rule.SrcZone -InternetZoneSet $InternetZoneSet)
         $serviceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
         if ($srcZoneFullyOpen -and $null -eq $rule.SrcAddr -and
@@ -582,42 +434,39 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        if (Test-IsNegatedPublicPattern -RawTokens $rule.SrcAddr) {
+        if (Test-IsNegatedPublicPattern -RawTokens $rule.SrcAddr -Strict) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "negated_rfc1918_effectively_public"
                 Detail   = "Source address ('$($rule.SrcAddrRaw)') negates the private RFC1918 ranges. Functionally equivalent to 'any public source address', even though no token literally says 'any'. Easy to miss in manual review."
             }
         }
-        if (Test-IsNegatedPublicPattern -RawTokens $rule.DstAddr) {
+        if (Test-IsNegatedPublicPattern -RawTokens $rule.DstAddr -Strict) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "negated_rfc1918_effectively_public"
                 Detail   = "Destination address ('$($rule.DstAddrRaw)') negates the private RFC1918 ranges. Functionally equivalent to 'any public destination address', even though no token literally says 'any'. Easy to miss in manual review."
             }
         }
-        if (Test-IsAllRfc1918Pattern -RawTokens $rule.SrcAddr) {
+        if (Test-IsAllRfc1918Pattern -RawTokens $rule.SrcAddr -Strict) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "all_rfc1918_effectively_private"
                 Detail   = "Source address ('$($rule.SrcAddrRaw)') lists all three private RFC1918 ranges together. Functionally equivalent to 'any private source address', even though no token literally says 'any'. Easy to miss in manual review."
             }
         }
-        if (Test-IsAllRfc1918Pattern -RawTokens $rule.DstAddr) {
+        if (Test-IsAllRfc1918Pattern -RawTokens $rule.DstAddr -Strict) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "all_rfc1918_effectively_private"
                 Detail   = "Destination address ('$($rule.DstAddrRaw)') lists all three private RFC1918 ranges together. Functionally equivalent to 'any private destination address', even though no token literally says 'any'. Easy to miss in manual review."
             }
         }
 
-        if ($rule.HitCount -match '^\d+$' -and [int]$rule.HitCount -eq 0) {
+        if ($rule.HitCount -match '^\d+$' -and [int64]$rule.HitCount -eq 0) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "zero_hit_count"
                 Detail   = "Recorded hit count of zero. Candidate for removal after confirming the observation window is representative."
             }
         }
 
-        # Panorama's own Rule Usage status (used/unused/partially used) is a
-        # distinct signal from a numeric hit count. It's computed across
-        # every managed firewall a rule applies to, not just one. See
-        # https://docs.paloaltonetworks.com/ngfw/administration/monitoring/view-policy-rule-usage
+        # Panorama's own verdict, across all the firewalls the rule applies to.
         if ($rule.UsageStatus -eq "unused") {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "rule_usage_unused"
@@ -631,42 +480,31 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # A rule with SOME recorded hits isn't caught by zero_hit_count, but
-        # if its last match was a long time ago it's still effectively
-        # stale, e.g. a one-off access grant nobody has used in over a
-        # year. Only fires for a positive hit count; hit count = 0 is
-        # already covered above, and re-flagging it here would just be
-        # noise about the same underlying fact.
-        if ($rule.HitCount -match '^\d+$' -and [int]$rule.HitCount -gt 0 -and $rule.LastHit) {
+        # Hit once, but not for a long time. Zero hits is zero_hit_count's job.
+        # Tufin has a date but no counter: the date proves it was hit.
+        $hasHits = ($rule.HitCount -match '^\d+$' -and [int64]$rule.HitCount -gt 0) -or ($rule.PSObject.Properties['LastHitMeansHit'] -and $rule.LastHitMeansHit)
+        if ($hasHits -and $rule.LastHit) {
             $parsedLastHit = [datetime]::MinValue
             if ([datetime]::TryParse($rule.LastHit, [ref]$parsedLastHit)) {
                 $daysSinceLastHit = (New-TimeSpan -Start $parsedLastHit -End (Get-Date)).Days
                 if ($daysSinceLastHit -gt $StaleHitDays) {
                     $findings += [PSCustomObject]@{
                         RuleName = $rule.Name; Severity = "Medium"; Type = "stale_last_hit"
-                        Detail   = "Last matched traffic $daysSinceLastHit days ago ($($rule.LastHit)), past the $StaleHitDays-day staleness threshold, despite a non-zero hit count ($($rule.HitCount)). Worth confirming this is still needed rather than a one-off grant nobody uses anymore."
+                        Detail   = "Last matched traffic $daysSinceLastHit days ago ($($rule.LastHit)), past the $StaleHitDays-day staleness threshold, despite $(if ($rule.HitCount -match '^\d+$') { "a non-zero hit count ($($rule.HitCount))" } else { 'having been hit' }). Worth confirming this is still needed rather than a one-off grant nobody uses anymore."
                     }
                 }
             }
         }
 
-        # Critical zone isolation (such as SWIFT CSCF / PCI DSS / FFIEC): sensitive
-        # zones (SWIFT secure zone, CDE, ATM, core banking, HSM, POS, etc.) must be
-        # isolated from the general network, not just from the internet.
-        # Only fires if -CriticalZones was actually configured. This is
-        # org-specific with no sensible universal default.
+        # Critical zones (SWIFT, CDE, HSM...) must be isolated from the rest
+        # of the network too, not just the internet. Only with -CriticalZones.
         if ($rule.Action -eq "allow" -and $CriticalZoneSet.Count -gt 0) {
             $dstIsCritical = Test-ZoneInSet -Zones $rule.DstZone -ZoneSet $CriticalZoneSet
             $srcIsCritical = Test-ZoneInSet -Zones $rule.SrcZone -ZoneSet $CriticalZoneSet
             if ($dstIsCritical -and -not $srcIsCritical) {
                 $criticalServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
                 $broadDims = @()
-                # Source zone only counts as unrestricted when the source
-                # address doesn't already narrow it down: zone="any" with a
-                # specific subnet in the address field means only hosts in
-                # that subnet can actually reach the critical zone, no
-                # matter how many zones the field nominally allows - PAN-OS
-                # matches zone and address together, not either alone.
+                # Zone any with a specific source address isn't open.
                 if (($rule.SrcZone -contains "any") -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr)) { $broadDims += "source zone" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $broadDims += "source address" }
                 if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $broadDims += "destination address (reaches the entire critical zone, not a specific host)" }
@@ -680,13 +518,7 @@ function Invoke-DeterministicChecks {
                 }
             }
 
-            # Mirror case: the critical zone reaching OUT broadly, not just
-            # the general network reaching IN. SWIFT CSCF and PCI DSS both
-            # require isolation in both directions, not just "nothing gets
-            # in without control" - a compromised or misused host inside a
-            # critical zone with unrestricted egress can exfiltrate data or
-            # reach a C2 server just as easily as an attacker could reach in
-            # through an overly broad inbound rule.
+            # The other direction: wide open egress out of a critical zone.
             if ($srcIsCritical -and -not $dstIsCritical) {
                 $egressServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
                 $egressBroadDims = @()
@@ -703,21 +535,9 @@ function Invoke-DeterministicChecks {
                 }
             }
 
-            # Compliance/critical-scope tag without a matching critical
-            # zone: a rule tagged as PCI/SWIFT/CDE-scoped (or similar) but
-            # touching neither side of $CriticalZoneSet at all. Either the
-            # tag is wrong (copy-pasted from another rule, or scope drifted
-            # since the tag was applied), or -CriticalZones is missing a
-            # zone this organization actually considers in scope - both are
-            # worth a second look for anyone using Tags to build a
-            # compliance inventory. Skipped when either zone is "any":
-            # "any" already includes the critical zone among everything
-            # else it matches, so there's no real mismatch to flag there.
-            #
-            # Matched by exact tag token (same splitting convention as the
-            # temp/POC check below), not raw substring, so a tag like
-            # "special-project" doesn't false-positive on "pci" as a
-            # substring of something else entirely.
+            # Tagged PCI/SWIFT/... but touching no critical zone: the tag is
+            # stale or -CriticalZones is missing a zone. Whole tag words only;
+            # skipped when a zone is any (that already includes the zone).
             if ($rule.Tags) {
                 $complianceScopeTags = @("pci", "pci-dss", "cde", "swift", "cscf", "hipaa", "phi", "sox", "ffiec", "core-banking", "atm", "hsm")
                 $tagTokensForScope = @($rule.Tags -split '[-_\s\.,;]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
@@ -736,23 +556,12 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # A rule tagged as temporary/POC/test that's still broad is a
-        # documented real world audit failure pattern (SWIFT CSCF cites
-        # "broad allow-any firewall entries added as a temporary change
-        # years ago and never removed").
-        #
-        # Checked in both the rule Name and Tags, not Tags alone: a rule
-        # literally named "TEMP_ACCESS_11" or "POC-Integration-Test" with
-        # no tags set at all is a common pattern (our own demo data does
-        # exactly this), and tags-only matching would miss it.
-        #
-        # Matched by exact token, not raw substring: splitting on the
-        # common separators (-, _, space, .) first and comparing whole
-        # tokens avoids a false positive like "Attempted-Migration"
-        # matching "temp" as a substring of "Attempted".
+        # "Temporary" rules that are still broad: a classic audit finding.
+        # Looks at the name and the tags, whole words only (so
+        # "Attempted-Migration" isn't "temp").
         if ($rule.Action -eq "allow") {
             $tempKeywords = @("temp", "poc", "test", "trial")
-            $nameTokens = @($rule.Name -split '[-_\s\.]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
+            $nameTokens = @($localName -split '[-_\s\.]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() })
             $tagTokens = @()
             if ($rule.Tags) { $tagTokens = @($rule.Tags -split '[-_\s\.,;]+' | Where-Object { $_ -ne "" } | ForEach-Object { $_.ToLower() }) }
             $matchedInName = $tempKeywords | Where-Object { $nameTokens -contains $_ } | Select-Object -First 1
@@ -768,15 +577,7 @@ function Invoke-DeterministicChecks {
                 }
             }
             elseif ($matchedKeyword) {
-                # Narrowly-scoped temp-tagged rules aren't a broad-exposure
-                # risk the way the case above is, but the tag itself is
-                # still a lifecycle signal someone deliberately left behind:
-                # a scoped vendor/POC grant that was meant to be revisited
-                # and reviewed is just as easy to forget as a broad one,
-                # it just isn't dangerous in the same way. Kept as its own
-                # Low finding rather than folded into the Medium one above,
-                # since the two represent genuinely different urgency, not
-                # the same fact at two severities.
+                # Narrow but still "temporary": a reminder, so Low.
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = "Low"; Type = "temporary_tag_still_present"
                     Detail   = "Rule signals temporary/POC/test intent via $matchSource. Scope is already restricted, not a broad-exposure concern, but this suggests it was meant to be reviewed and removed at some point. Worth confirming it's still needed."
@@ -784,12 +585,8 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # Port-based matching instead of App-ID: Application left as "any"
-        # but Service names explicit port(s). This loses App-ID visibility
-        # (app-hopping over non-standard ports, App-ID-specific threat
-        # signatures) regardless of whether the port itself happens to be on
-        # the risky list. This is a distinct best-practice concern from
-        # inbound/internal_risky_port, which only fires for specific ports.
+        # Application any with explicit ports: no App-ID visibility, whatever
+        # the port is.
         $serviceIsPortBased = $rule.Service -and ($rule.ServiceRaw.Trim().ToLower() -ne "application-default")
         if ($rule.Action -eq "allow" -and $null -eq $rule.Application -and $serviceIsPortBased) {
             $portsHere = Get-ServicePorts -ServiceTokens $rule.Service
@@ -802,20 +599,29 @@ function Invoke-DeterministicChecks {
             elseif ($riskyHit.Count -gt 0) {
                 $extraNote = " At least one port ($($riskyHit -join ',')) is also on the high-risk list."
             }
-            $findings += [PSCustomObject]@{
-                RuleName = $rule.Name; Severity = "Medium"; Type = "port_based_rule_missing_app_id"
-                Detail   = "Rule matches by port ($($rule.ServiceRaw)) with Application left as 'any', instead of a named App-ID.$extraNote Consider migrating to an explicit application for App-ID-based inspection."
+            # Wording per vendor. On FortiGate an app control profile
+            # ("app:" in Profile) already closes the gap.
+            $portDetail = "Rule matches by port ($($rule.ServiceRaw)) with Application left as 'any', instead of a named App-ID.$extraNote Consider migrating to an explicit application for App-ID-based inspection."
+            $skipPortBased = $false
+            if ($rule.Vendor -eq 'fortios') {
+                if ($rule.Profile -match '(^|;)app:') { $skipPortBased = $true }
+                $portDetail = "Rule matches by port ($($rule.ServiceRaw)) with no application match and no application control profile.$extraNote Consider an application control profile, or matching applications in NGFW policy-based mode, so traffic is identified by application rather than by port alone."
+            }
+            elseif ($rule.Vendor -and $rule.Vendor -notin @('paloalto', 'junos')) {
+                $portDetail = "Rule matches by port ($($rule.ServiceRaw)) with no application match.$extraNote Consider matching the application (application control / application aware rules on this platform), so traffic is identified by application rather than by port alone."
+            }
+            if ($rule.Vendor -eq 'junos') {
+                $portDetail = "Rule matches by port ($($rule.ServiceRaw)) with no dynamic application.$extraNote Consider matching the application with AppSecure (match dynamic-application, with application junos-defaults), so traffic is identified by application rather than by port alone."
+            }
+            if (-not $skipPortBased) {
+                $findings += [PSCustomObject]@{
+                    RuleName = $rule.Name; Severity = "Medium"; Type = "port_based_rule_missing_app_id"
+                    Detail   = $portDetail
+                }
             }
         }
 
-        # A rule can be just as hard to audit and maintain with 200
-        # individually-listed addresses as with a literal "any" - large
-        # enumerated lists are a common symptom of a whitelist that grew
-        # unchecked over time, and are easy to skip past in manual review
-        # since nothing about them LOOKS wide open the way "any" does.
-        # Several real-world firewall audit checklists specifically call
-        # this out as its own finding, distinct from the any/none-based
-        # checks elsewhere in this file.
+        # 200 listed addresses are as hard to audit as "any".
         if ($rule.Action -eq "allow") {
             $srcCount = $rule.SrcAddrTokenCount
             $dstCount = $rule.DstAddrTokenCount
@@ -830,14 +636,8 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # An allow rule with no logging at all leaves no trail if that
-        # traffic is ever involved in an incident. Only checked when the
-        # Options column both exists AND has been confirmed to actually
-        # carry logging information somewhere in this ruleset (see
-        # anyRuleShowsLogging below, computed once outside this loop):
-        # some export types don't include logging detail in this column at
-        # all, and flagging every single rule in that case would be a
-        # false-positive flood rather than a real finding.
+        # No logging, no trail. Only when the export carries logging info
+        # (see $anyRuleShowsLogging).
         if ($rule.Action -eq "allow" -and $rule.HasOptionsColumn -and $anyRuleShowsLogging) {
             $optionsLower = $rule.Options.ToLower()
             if ($optionsLower -notmatch "$loggingPattern|$forwardingPattern") {
@@ -848,10 +648,7 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # Direct reachability to a well-known public DNS resolver bypasses
-        # internal/corporate DNS. Worth flagging regardless of the exact
-        # protocol (plain DNS, DoT, or DoH, the last of which is otherwise
-        # invisible at the port level since it rides over ordinary HTTPS).
+        # A public resolver bypasses corporate DNS, whatever the protocol.
         if ($rule.Action -eq "allow") {
             $resolverMatches = Get-KnownDnsResolverMatches -AddrTokens $rule.DstAddr
             if ($resolverMatches.Count -gt 0) {
@@ -863,42 +660,32 @@ function Invoke-DeterministicChecks {
                 }
             }
 
-            # Two more specific plain-DNS (port 53) patterns, distinct from
-            # the general resolver check above: that one fires regardless
-            # of protocol, these confirm the traffic is specifically
-            # unencrypted DNS, which adds a cleartext-exposure angle on top
-            # of the DNS-bypass one (queries visible to anyone observing
-            # the traffic, not just reaching an uncontrolled resolver).
+            # Plain, unencrypted DNS: port 53 or the dns / dns-base app.
             $dnsPorts = Get-ServicePorts -ServiceTokens $rule.Service
-            if ($dnsPorts -contains 53) {
+            $dnsByPort = $dnsPorts -contains 53
+            $dnsByApp = (-not $dnsByPort) -and (@($rule.Application | Where-Object { $_ -in @('dns', 'dns-base') }).Count -gt 0)
+            if ($dnsByPort -or $dnsByApp) {
+                $dnsWhat = if ($dnsByPort) { "plain DNS (port 53)" } else { "plain DNS ($(Get-AppIdLabel $rule) '$(@($rule.Application | Where-Object { $_ -in @('dns', 'dns-base') })[0])')" }
                 if ($null -eq $rule.DstAddr) {
                     $findings += [PSCustomObject]@{
                         RuleName = $rule.Name; Severity = "Medium"; Type = "plain_dns_to_unrestricted_destination"
-                        Detail   = "Rule allows plain DNS (port 53) to an unrestricted destination (any). Unencrypted queries can go to literally any server, with no way to filter or inspect where they end up. A common DNS-tunneling/data-exfiltration pattern, not just a DNS-bypass one. Consider scoping the destination to approved resolvers."
+                        Detail   = "Rule allows $dnsWhat to an unrestricted destination (any). Unencrypted queries can go to literally any server, with no way to filter or inspect where they end up. A common DNS-tunneling/data-exfiltration pattern, not just a DNS-bypass one. Consider scoping the destination to approved resolvers."
                     }
                 }
                 elseif ($resolverMatches.Count -gt 0) {
                     $resolverList = $resolverMatches -join ", "
                     $findings += [PSCustomObject]@{
                         RuleName = $rule.Name; Severity = "Medium"; Type = "plain_dns_to_known_resolver"
-                        Detail   = "Rule allows plain DNS (port 53) specifically to a well-known public resolver ($resolverList). Unlike DoH/DoT to the same destination, the query content itself is visible in cleartext to anyone observing the traffic, on top of bypassing internal DNS controls."
+                        Detail   = "Rule allows $dnsWhat specifically to a well-known public resolver ($resolverList). Unlike DoH/DoT to the same destination, the query content itself is visible in cleartext to anyone observing the traffic, on top of bypassing internal DNS controls."
                     }
                 }
             }
         }
 
         if ($srcIsInet) {
-            # It fires whenever the source touches the internet by ANY means,
-            # including a rule
-            # scoped to one single concrete address (e.g. a whitelisted
-            # partner IP) where the ZONE is what's unrestricted, not the
-            # address. Renamed and reworded to say which one it actually is.
-            #
-            # Severity is Medium, not High: by itself this is context (which
-            # rules make up the internet-facing surface), not a concrete
-            # risk. Whatever makes a specific rule actually dangerous (a
-            # risky app/port, no security profile, wide-open fields) already
-            # fires its own more specific Critical/High finding above.
+            # Context more than risk, hence Medium: the dangerous cases get
+            # their own findings. The text says whether the zone or the
+            # address is what's open.
             $zoneIsTheReason = Test-ZoneTouchesInternet -Zones $rule.SrcZone -InternetZoneSet $InternetZoneSet
             $zonePhrase = if ($zoneIsTheReason) { "source zone '$($rule.SrcZone -join ';')' is internet-facing" } else { "source address itself includes public IP space" }
             $addrPhrase = if ($null -eq $rule.SrcAddr) { "with an unrestricted source address (any), reachable from anywhere on the internet" } else { "though scoped to a specific source address ('$($rule.SrcAddrRaw)'), not an unrestricted source" }
@@ -909,10 +696,7 @@ function Invoke-DeterministicChecks {
         }
 
         if ($dstIsInet) {
-            # Symmetric counterpart to inbound_from_internet above, same
-            # Medium reasoning: on its own this is context (which rules send
-            # traffic out to the internet), not a concrete risk by itself.
-            # Fires regardless of srcIsInet, same as the inbound check does.
+            # Same thing for the destination side.
             $dstZoneIsTheReason = Test-ZoneTouchesInternet -Zones $rule.DstZone -InternetZoneSet $InternetZoneSet
             $dstZonePhrase = if ($dstZoneIsTheReason) { "destination zone '$($rule.DstZone -join ';')' is internet-facing" } else { "destination address itself includes public IP space" }
             $dstAddrPhrase = if ($null -eq $rule.DstAddr) { "with an unrestricted destination address (any), reaching anywhere on the internet" } else { "though scoped to a specific destination address ('$($rule.DstAddrRaw)'), not an unrestricted destination" }
@@ -929,13 +713,8 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # Application=any only means "unrestricted" here when Service isn't
-        # separately pinning the traffic to a specific port: Application=any
-        # with Service=tcp/8080 is a port-based rule, not an open one, and
-        # that combination is already its own finding
-        # (port_based_rule_missing_app_id) rather than double-counted here.
-        # Same reasoning and same helper as internet_exposed_any_field's
-        # equivalent fix above.
+        # Application any with a fixed port is a port-based rule, not an open
+        # one (port_based_rule_missing_app_id covers it).
         if (-not $srcIsInet -and $dstIsInet -and $null -ne $rule.DstAddr -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "outbound_defined_dest_any_app"
@@ -943,44 +722,28 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # A risky/cleartext protocol permitted OUTBOUND to the internet fell
-        # through the cracks between the two checks below: inbound_risky_*
-        # requires the SOURCE to touch internet, internal_risky_* requires
-        # NEITHER side to. A pure outbound rule (source internal, destination
-        # internet) matches neither condition, even though an internal host
-        # allowed to run RDP/SSH/Telnet out to arbitrary internet
-        # destinations is a real concern in its own right: a data
-        # exfiltration or C2 tunneling channel if that host is ever
-        # compromised, not just an internet-exposure question. Same High
-        # severity as internal_risky_*, matching the same "requires the
-        # attacker to already have some internal position" reasoning,
-        # rather than Critical's "reachable with no prior access at all".
+        # Risky protocols going out: an exfiltration / C2 channel if the
+        # host is compromised. High, like the internal ones, since it needs a
+        # foothold first.
         if (-not $srcIsInet -and $dstIsInet) {
             if ($rule.Application) {
                 foreach ($app in $rule.Application) {
                     if ($RiskyApplications.ContainsKey($app)) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "outbound_risky_application"
-                            Detail   = "Outbound rule permits a high-risk application ($($RiskyApplications[$app]), App-ID '$app') from source address='$($rule.SrcAddrRaw)' out to the internet. A potential data-exfiltration or tunneling channel if the source host is ever compromised. Verify this is intentional and scoped down if not."
+                            Detail   = "Outbound rule permits a high-risk application ($($RiskyApplications[$app]), $(Get-AppIdLabel $rule) '$app') from source address='$($rule.SrcAddrRaw)' out to the internet. A potential data-exfiltration or tunneling channel if the source host is ever compromised. Verify this is intentional and scoped down if not."
                         }
                     }
                 }
             }
-            # Some real exports use a custom-named Service object literally
-            # named after the protocol (e.g. a Service object called
-            # "smtp"), a pre-App-ID/legacy naming convention still seen in
-            # older rulebases. Get-ServicePorts below only recognizes the
-            # "tcp-<port>" naming pattern, so a token like this is
-            # otherwise invisible to any risky-protocol check; checked
-            # here as a literal name match against the same risky-app list
-            # Application uses above, not a port lookup.
+            # Service objects named after the protocol ("smtp").
             if ($rule.Service) {
                 foreach ($svc in $rule.Service) {
                     $matchedRiskyName = Test-ServiceNameImpliesRiskyApp -ServiceToken $svc -RiskyApplications $RiskyApplications
                     if ($matchedRiskyName) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "outbound_risky_application"
-                            Detail   = "Outbound rule permits a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than App-ID) from source address='$($rule.SrcAddrRaw)' out to the internet. A potential data-exfiltration or tunneling channel if the source host is ever compromised. Verify this is intentional and scoped down if not."
+                            Detail   = "Outbound rule permits a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than $(Get-AppIdLabel $rule)) from source address='$($rule.SrcAddrRaw)' out to the internet. A potential data-exfiltration or tunneling channel if the source host is ever compromised. Verify this is intentional and scoped down if not."
                         }
                     }
                 }
@@ -996,22 +759,9 @@ function Invoke-DeterministicChecks {
                 }
             }
 
-            # ICMP-family traffic allowed outbound to an unrestricted
-            # destination is a classic covert-channel pattern: ICMP is
-            # rarely inspected as closely as TCP/UDP traffic (it's "just
-            # ping"), and data can be encoded in echo/payload fields to
-            # exfiltrate data or maintain a C2 channel. "ping" (App-ID for
-            # ICMP type 0/8 specifically) and "icmp" (the broader App-ID
-            # covering every other ICMP type) are genuinely different
-            # App-IDs in PAN-OS, confirmed by Palo Alto's own KB: a rule
-            # scoped to "ping" alone does NOT also cover general ICMP, and
-            # vice versa, so both need checking, along with "ipv6-icmp"
-            # (the IPv6 equivalent) and "traceroute" (ICMP-based, same
-            # underlying protocol). The Service field is checked too as a
-            # defensive fallback for a custom-named Service object, though
-            # Palo Alto's own guidance is that ICMP has no real port to
-            # match on Service and is normally left as application-default
-            # or any there, not a literal "icmp" string.
+            # ICMP out to anywhere: a covert channel nobody inspects. "ping"
+            # and "icmp" are separate App-IDs, so check both, plus IPv6 and
+            # traceroute. A service named icmp counts too, just in case.
             $icmpFamilyApps = @("ping", "icmp", "ipv6-icmp", "traceroute")
             $hasIcmpApp = $rule.Application -and (@($rule.Application | Where-Object { $icmpFamilyApps -contains $_ }).Count -gt 0)
             $hasIcmpService = $rule.Service -and (@($rule.Service | Where-Object { $_ -match "icmp" }).Count -gt 0)
@@ -1024,21 +774,15 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # Note: fires on $srcIsInet alone, not requiring the destination to
-        # be non-internet. A risky/cleartext protocol reachable from an
-        # internet-facing source is dangerous regardless of whether the
-        # destination side also happens to be internet-facing (e.g. both
-        # Source Zone and Destination Zone set to "any") - that combination
-        # is if anything more exposed, not less, so it should not silently
-        # avoid this check the way an overly strict "inbound-only" condition
-        # would cause.
+        # Only the source matters here: an internet destination as well
+        # doesn't make it any safer.
         if ($srcIsInet) {
             if ($rule.Application) {
                 foreach ($app in $rule.Application) {
                     if ($RiskyApplications.ContainsKey($app)) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "Critical"; Type = "inbound_risky_application"
-                            Detail   = "Inbound from the internet using a high-risk application ($($RiskyApplications[$app]), App-ID '$app') toward destination address='$($rule.DstAddrRaw)'. Verify this is intentional and scoped down (specific source IPs, MFA/VPN in front of it) if not."
+                            Detail   = "Inbound from the internet using a high-risk application ($($RiskyApplications[$app]), $(Get-AppIdLabel $rule) '$app') toward destination address='$($rule.DstAddrRaw)'. Verify this is intentional and scoped down (specific source IPs, MFA/VPN in front of it) if not."
                         }
                     }
                 }
@@ -1049,7 +793,7 @@ function Invoke-DeterministicChecks {
                     if ($matchedRiskyName) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "Critical"; Type = "inbound_risky_application"
-                            Detail   = "Inbound from the internet using a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than App-ID) toward destination address='$($rule.DstAddrRaw)'. Verify this is intentional and scoped down (specific source IPs, MFA/VPN in front of it) if not."
+                            Detail   = "Inbound from the internet using a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than $(Get-AppIdLabel $rule)) toward destination address='$($rule.DstAddrRaw)'. Verify this is intentional and scoped down (specific source IPs, MFA/VPN in front of it) if not."
                         }
                     }
                 }
@@ -1065,22 +809,13 @@ function Invoke-DeterministicChecks {
                 }
             }
 
-            # Amplification/reflection: a different risk framing from the
-            # two checks just above. Those are about THIS network being
-            # compromised through a risky inbound service; this one is
-            # about THIS firewall's own server being abused to bounce large
-            # UDP responses at a spoofed third-party victim (the attacker
-            # never has to receive anything back, since it forges the
-            # victim's address as the source). UDP transport is what makes
-            # this possible in the first place, so it's checked via
-            # Get-ServiceUdpPorts rather than the transport-agnostic
-            # Get-ServicePorts used for $RiskyPorts above.
+            # Amplification: our server used against someone else. UDP only.
             if ($rule.Application) {
                 foreach ($app in $rule.Application) {
                     if ($AmplificationProneApplications.ContainsKey($app)) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "exposed_amplification_prone_service"
-                            Detail   = "Inbound from the internet to an amplification-prone UDP service ($($AmplificationProneApplications[$app]), App-ID '$app') toward destination address='$($rule.DstAddrRaw)'. A server answering this from the open internet can be abused as a reflector/amplifier in a DDoS attack against a third party: the attacker spoofs the victim's source address, and your server sends its (often much larger) response there instead of back to the attacker. This is a risk to others as much as to this network. Restrict the source to specific, known hosts if this is meant for legitimate reachability."
+                            Detail   = "Inbound from the internet to an amplification-prone UDP service ($($AmplificationProneApplications[$app]), $(Get-AppIdLabel $rule) '$app') toward destination address='$($rule.DstAddrRaw)'. A server answering this from the open internet can be abused as a reflector/amplifier in a DDoS attack against a third party: the attacker spoofs the victim's source address, and your server sends its (often much larger) response there instead of back to the attacker. This is a risk to others as much as to this network. Restrict the source to specific, known hosts if this is meant for legitimate reachability."
                         }
                     }
                 }
@@ -1096,18 +831,8 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # General catch-all: any rule that touches the internet on either
-        # side (inbound and/or outbound, including a literal "any" zone,
-        # which the directional checks above treat as internet-facing too)
-        # with source address, destination address, or application left
-        # unrestricted. The narrower checks above only fire for specific
-        # single-dimension combinations (e.g. broad destination but a
-        # defined app); this one catches the gaps between them, such as a
-        # rule where BOTH destination and application are "any"
-        # simultaneously, or a rule with "Destination Zone: any" reaching
-        # both directions at once. Deliberately allowed to overlap with the
-        # more specific findings above; each is independently true and
-        # worth surfacing.
+        # Catch-all: internet on either side with some field left open. It
+        # overlaps with the narrower checks above on purpose.
         if ($rule.Action -eq "allow" -and ($srcIsInet -or $dstIsInet)) {
             $serviceEffectivelyAny2 = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
             $anyDims = @()
@@ -1115,31 +840,12 @@ function Invoke-DeterministicChecks {
             if (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) { $anyDims += "source address" }
             if (($rule.DstZone -contains "any") -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr)) { $anyDims += "destination zone" }
             if (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) { $anyDims += "destination address" }
-            # Application counts as open only when Service doesn't already
-            # restrict things: Application=any with Service=any (or
-            # application-default with no app set) is genuinely
-            # unrestricted, but Application=any with Service pinned to a
-            # specific port (e.g. tcp/8080) is a port-based rule, not a
-            # wide-open one - that combination is what
-            # port_based_rule_missing_app_id already flags on its own
-            # terms (missing App-ID visibility), and double-counting it
-            # here as "application left unrestricted" would overstate how
-            # open the rule actually is.
+            # Application any on a fixed port isn't "open application".
             if ($null -eq $rule.Application -and $serviceEffectivelyAny2) { $anyDims += "application" }
             if ($serviceEffectivelyAny2) { $anyDims += "service" }
             if ($anyDims.Count -gt 0) {
-                # Escalated to Critical when address, application, AND
-                # service are all wide open, regardless of whether the side
-                # touching internet got there via a literal "any" zone or a
-                # specifically named internet zone (e.g. "outside"). Without
-                # this, a rule scoped to a named internet zone but otherwise
-                # just as open as any_any_any_allow (any source address, any
-                # destination, any app, any service) only ever reached High
-                # - the same practical risk, understated because
-                # any_any_any_allow only fires on the literal string "any".
-                # Same broadened test as $anyDims above: a negated/all-RFC1918
-                # address field is exactly as open as a literal "any" one for
-                # this purpose, just spelled differently.
+                # Everything open: Critical, even through a named internet
+                # zone (any_any_any_allow only catches the literal "any").
                 $severity = if ((Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr) -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr) -and $null -eq $rule.Application -and $serviceEffectivelyAny2) { "Critical" } else { "High" }
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = $severity; Type = "internet_exposed_any_field"
@@ -1172,7 +878,7 @@ function Invoke-DeterministicChecks {
                     if ($RiskyApplications.ContainsKey($app)) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "internal_risky_application"
-                            Detail   = "Internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) allows a high-risk application ($($RiskyApplications[$app]), App-ID '$app'). Lateral-movement risk even though this doesn't touch the internet directly."
+                            Detail   = "Internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) allows a high-risk application ($($RiskyApplications[$app]), $(Get-AppIdLabel $rule) '$app'). Lateral-movement risk even though this doesn't touch the internet directly."
                         }
                     }
                 }
@@ -1183,7 +889,7 @@ function Invoke-DeterministicChecks {
                     if ($matchedRiskyName) {
                         $findings += [PSCustomObject]@{
                             RuleName = $rule.Name; Severity = "High"; Type = "internal_risky_application"
-                            Detail   = "Internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) allows a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than App-ID). Lateral-movement risk even though this doesn't touch the internet directly."
+                            Detail   = "Internal rule ($($rule.SrcZone -join ';') -> $($rule.DstZone -join ';')) allows a high-risk application ($($RiskyApplications[$matchedRiskyName]), named as Service '$svc' rather than $(Get-AppIdLabel $rule)). Lateral-movement risk even though this doesn't touch the internet directly."
                         }
                     }
                 }
@@ -1201,7 +907,8 @@ function Invoke-DeterministicChecks {
         }
 
         # --- Exposed to the internet but no security profile applied ---
-        if (($srcIsInet -or $dstIsInet) -and ($rule.Profile.ToLower() -eq "" -or $rule.Profile.ToLower() -eq "none")) {
+        # Not with -NoSecurityProfileChecks (another device inspects).
+        if (-not $SkipSecurityProfileCheck -and ($srcIsInet -or $dstIsInet) -and ($rule.Profile.ToLower() -eq "" -or $rule.Profile.ToLower() -eq "none")) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "no_security_profile_on_exposed_rule"
                 Detail   = "Rule touches the internet (inbound or outbound) but has no security profile group applied (Profile='$($rule.Profile)'). No threat prevention/antivirus/URL filtering inspection on this exposed traffic."
@@ -1210,36 +917,28 @@ function Invoke-DeterministicChecks {
     }
     Write-Progress -Activity "Analyzing ruleset" -Completed -Id 1
 
-    # Pre-parse every rule's addresses AND lowercase its zones ONCE here,
-    # since both O(n^2) loops below compare the same rule against many
-    # others - without this, the same strings get re-parsed/re-lowercased
-    # on every single comparison they take part in.
+    # Parse addresses, lowercase zones and classify actions once: the
+    # pairwise loops below would otherwise redo it on every comparison.
     $parsedSrcAddr = @{}
     $parsedDstAddr = @{}
     $lowerSrcZone = @{}
     $lowerDstZone = @{}
+    $actionClass = @{}
     foreach ($r in $Rules) {
         $parsedSrcAddr[$r.Index] = ConvertTo-ParsedAddressList -AddrTokens $r.SrcAddr
         $parsedDstAddr[$r.Index] = ConvertTo-ParsedAddressList -AddrTokens $r.DstAddr
         $lowerSrcZone[$r.Index] = @($r.SrcZone | ForEach-Object { $_.ToLower() })
         $lowerDstZone[$r.Index] = @($r.DstZone | ForEach-Object { $_.ToLower() })
+        $actionClass[$r.Index] = Get-ActionClass $r.Action
     }
 
-    # Duplicate / shadowed detection (order-sensitive, enabled allow rules only)
-    #
-    # Zone-pair bucketing: two rules can only match/shadow each other if
-    # their zones are compatible (exactly equal, or one side is "any").
-    # Grouping earlier rules by their exact zone-pair signature, and
-    # keeping a separate short list of "any"-zoned rules that could
-    # potentially match anything, means a rule only gets compared against
-    # candidates that could plausibly match - not every earlier rule
-    # unconditionally. On a ruleset spanning many distinct zones (the
-    # normal case at real-world scale), most rule PAIRS have incompatible
-    # zones, so skipping those comparisons entirely is what turns
-    # the effective cost from O(n^2) into roughly O(n x average bucket
-    # size), which is much smaller when zones are varied.
+    # Duplicates and shadowing among enabled allow rules, in order.
+    # Earlier rules are bucketed by zone pair (plus a list of "any" zone
+    # rules), so each rule is only compared with ones whose zones can match.
+    # Buckets are per Scope: different VDOMs / logical systems / devices
+    # never see each other's traffic.
     $enabledAllow = @($Rules | Where-Object { -not $_.Disabled -and $_.Action -eq "allow" })
-    $wildcardIdx = New-Object System.Collections.Generic.List[int]
+    $wildcardIdx = @{}
     $sigBuckets = @{}
     for ($i = 0; $i -lt $enabledAllow.Count; $i++) {
         if ($i % 100 -eq 0 -or $i -eq $enabledAllow.Count - 1) {
@@ -1254,7 +953,9 @@ function Invoke-DeterministicChecks {
         $ruleSig = (($ruleSrcZ | Sort-Object) -join ",") + "|" + (($ruleDstZ | Sort-Object) -join ",")
 
         $candidates = New-Object System.Collections.Generic.List[int]
-        $candidates.AddRange($wildcardIdx)
+        $scopeKey = "$($rule.Scope)"
+        $ruleSig = "$scopeKey#" + $ruleSig
+        if ($wildcardIdx.ContainsKey($scopeKey)) { $candidates.AddRange($wildcardIdx[$scopeKey]) }
         if ($sigBuckets.ContainsKey($ruleSig)) { $candidates.AddRange($sigBuckets[$ruleSig]) }
         $candidates.Sort()
 
@@ -1280,12 +981,7 @@ function Invoke-DeterministicChecks {
                 break
             }
 
-            # Service/port coverage matters here too: a rule scoped to one
-            # specific port (e.g. tcp-853) does not actually shadow a later
-            # rule on a different port (e.g. udp-53), even if zone/address/
-            # application otherwise look broad enough to cover it. PAN-OS
-            # itself still differentiates them by service, so treating them
-            # as shadowing without this check would be a false positive.
+            # The service has to be covered too: tcp-853 doesn't shadow udp-53.
             $shadowed = (Test-ZonesCoveredFast -EarlierLower $earlierSrcZ -LaterLower $ruleSrcZ) -and
                         (Test-ZonesCoveredFast -EarlierLower $earlierDstZ -LaterLower $ruleDstZ) -and
                         (Test-NetworksContainFast $earlierSrc $ruleSrc) -and
@@ -1302,7 +998,8 @@ function Invoke-DeterministicChecks {
         }
 
         if (($ruleSrcZ -contains "any") -or ($ruleDstZ -contains "any")) {
-            $wildcardIdx.Add($i)
+            if (-not $wildcardIdx.ContainsKey($scopeKey)) { $wildcardIdx[$scopeKey] = New-Object System.Collections.Generic.List[int] }
+            $wildcardIdx[$scopeKey].Add($i)
         }
         else {
             if (-not $sigBuckets.ContainsKey($ruleSig)) { $sigBuckets[$ruleSig] = New-Object System.Collections.Generic.List[int] }
@@ -1311,15 +1008,10 @@ function Invoke-DeterministicChecks {
     }
     Write-Progress -Activity "Analyzing ruleset" -Completed -Id 1
 
-    # Cross-action shadowing (order-sensitive, across ALL enabled rules,
-    # allow and deny together, in original rule order). The same-action loop
-    # above only ever compares allow-vs-allow, so it can never catch the case
-    # where a rule is shadowed by an EARLIER rule with a DIFFERENT action,
-    # which is the scenario where shadowing actually changes what traffic
-    # does, rather than just being redundant. Same zone-pair bucketing as
-    # above, plus a same-action skip within each candidate check.
-    $enabledAll = @($Rules | Where-Object { -not $_.Disabled })
-    $wildcardIdx2 = New-Object System.Collections.Generic.List[int]
+    # Shadowing across actions, over all enabled rules: this is where
+    # shadowing changes what the traffic does. Same bucketing as above.
+    $enabledAll = @($Rules | Where-Object { $null -ne $_ -and -not $_.Disabled })
+    $wildcardIdx2 = @{}
     $sigBuckets2 = @{}
     for ($i = 0; $i -lt $enabledAll.Count; $i++) {
         if ($i % 100 -eq 0 -or $i -eq $enabledAll.Count - 1) {
@@ -1334,14 +1026,17 @@ function Invoke-DeterministicChecks {
         $ruleSig = (($ruleSrcZ | Sort-Object) -join ",") + "|" + (($ruleDstZ | Sort-Object) -join ",")
 
         $candidates2 = New-Object System.Collections.Generic.List[int]
-        $candidates2.AddRange($wildcardIdx2)
+        $scopeKey = "$($rule.Scope)"
+        $ruleSig = "$scopeKey#" + $ruleSig
+        if ($wildcardIdx2.ContainsKey($scopeKey)) { $candidates2.AddRange($wildcardIdx2[$scopeKey]) }
         if ($sigBuckets2.ContainsKey($ruleSig)) { $candidates2.AddRange($sigBuckets2[$ruleSig]) }
         $candidates2.Sort()
 
         $foundCorrelationForRule = $false
+        $ruleClass = $actionClass[$rule.Index]
         foreach ($j in $candidates2) {
             $earlier = $enabledAll[$j]
-            if ($earlier.Action -eq $rule.Action) { continue }  # same-action case already handled above
+            $sameAction = $actionClass[$earlier.Index] -eq $ruleClass
             $earlierSrc = $parsedSrcAddr[$earlier.Index]
             $earlierDst = $parsedDstAddr[$earlier.Index]
             $earlierSrcZ = $lowerSrcZone[$earlier.Index]
@@ -1354,22 +1049,23 @@ function Invoke-DeterministicChecks {
                              (Test-ListContains $earlier.Application $rule.Application) -and
                              (Test-ListContains $earlier.Service $rule.Service)
 
+            # The first earlier rule that covers this one decides what happens
+            # to its traffic. If it has the same action, no later candidate
+            # matters: an allow further down can't open what a deny already
+            # dropped.
+            if ($crossShadowed -and $sameAction) { break }
+            if ($sameAction) { continue }
+
             if ($crossShadowed) {
-                if ($earlier.Action -eq "allow" -and $rule.Action -eq "deny") {
-                    # Dangerous: the deny meant to block something never fires.
-                    # That traffic is actually wide open via the earlier allow.
-                    # A false sense of security, not just dead policy.
+                if ($actionClass[$earlier.Index] -eq "allow" -and $ruleClass -eq "deny") {
+                    # The deny never fires: that traffic is open.
                     $findings += [PSCustomObject]@{
                         RuleName = $rule.Name; Severity = "Critical"; Type = "allow_shadows_deny"
                         Detail   = "This DENY rule is fully covered by an earlier ALLOW rule ('$($earlier.Name)') with equal-or-broader scope. It can never trigger. The traffic it was meant to block is actually permitted by the earlier rule. Whoever relies on this deny believes the traffic is blocked; it isn't."
                     }
                 }
-                elseif ($earlier.Action -eq "deny" -and $rule.Action -eq "allow") {
-                    # Less dangerous: the allow exception never fires and
-                    # traffic stays blocked. A functional bug (not a security
-                    # exposure), but worth flagging before someone "fixes" it
-                    # by adding an even broader rule higher up to chase the
-                    # symptom.
+                elseif ($actionClass[$earlier.Index] -eq "deny" -and $ruleClass -eq "allow") {
+                    # The allow never fires: a functional bug, not exposure.
                     $findings += [PSCustomObject]@{
                         RuleName = $rule.Name; Severity = "Medium"; Type = "deny_shadows_allow"
                         Detail   = "This ALLOW rule is fully covered by an earlier DENY rule ('$($earlier.Name)') with equal-or-broader scope. It can never trigger. The traffic it was meant to permit is actually still blocked by the earlier rule. Not a security exposure, but a functional bug. Whoever relies on this allow believes access exists when it doesn't."
@@ -1378,18 +1074,8 @@ function Invoke-DeterministicChecks {
                 break
             }
 
-            # Correlation anomaly (Al-Shaer/Hamed taxonomy, the same one
-            # Strata Cloud Manager's Policy Analyzer calls "Correlations"):
-            # two rules with different actions whose match criteria
-            # partially overlap without either one containing the other.
-            # Not shadowing (neither rule is fully dead) and not a
-            # Generalization (that requires full containment one way,
-            # checked separately below via a dedicated backward scan this
-            # candidate pool isn't built to support) - just a genuine,
-            # order-dependent ambiguity over the traffic in the overlap.
-            # Reported only once per rule (first match) to keep report
-            # volume sane; still Low severity per Al-Shaer et al., since
-            # this is a warning to review, not a confirmed misconfiguration.
+            # Correlation (Al-Shaer/Hamed): different actions, partial overlap,
+            # neither contains the other. Once per rule, Low.
             if (-not $foundCorrelationForRule) {
                 $laterCoversEarlier = (Test-ZonesCoveredFast -EarlierLower $ruleSrcZ -LaterLower $earlierSrcZ) -and
                                       (Test-ZonesCoveredFast -EarlierLower $ruleDstZ -LaterLower $earlierDstZ) -and
@@ -1415,39 +1101,17 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        # Generalization anomaly (the other half of the same Al-Shaer/Hamed
-        # pair, SCM's "Generalizations"): an EARLIER, narrower rule that is
-        # fully covered by a LATER, broader rule with a different action.
-        # This is the mirror image of the shadow check above (Earlier
-        # covers Later); here Later covers Earlier instead, which is a very
-        # different situation operationally: the earlier, narrow rule still
-        # fires and is NOT dead, it's a deliberate-looking exception carved
-        # out ahead of a broad catch-all. The anomaly is fragility, not
-        # brokenness - if the narrow rule is ever deleted (a cleanup
-        # mistake, assuming the broad rule "already covers it") or the two
-        # are reordered, the effective behavior for its traffic changes
-        # silently.
-        #
-        # This needs a genuinely different candidate set than $candidates2
-        # above: that bucketing only ever gathers EARLIER rules whose zone
-        # is "any" or matches $rule's own zone signature exactly, which is
-        # exactly backwards for this direction (a later "any"-zoned rule
-        # would never see an earlier zone-specific rule as a candidate that
-        # way). Rather than a second full O(n^2) pass, this only scans back
-        # through every earlier rule when the CURRENT rule looks broad
-        # enough to plausibly generalize something - broad zone or address
-        # is what a real catch-all rule looks like in practice - keeping
-        # the extra cost bounded by how many such broad rules exist, not by
-        # the ruleset size squared. A generalization pair that doesn't
-        # involve an obviously broad rule (e.g. two similarly-specific
-        # CIDRs where one happens to contain the other) is out of scope for
-        # this heuristic; the shadow check above already exists for the
-        # unambiguous "earlier covers later" direction regardless.
+        # Generalization: an earlier, narrower rule covered by this later,
+        # broader one with the other action. Not dead, but fragile: delete or
+        # reorder the exception and its traffic silently changes. The buckets
+        # above only look backwards from narrow to broad, so scan back by
+        # hand, and only when this rule looks broad (zone or address any).
         $ruleLooksBroadEnoughToGeneralize = ($ruleSrcZ -contains "any") -or ($ruleDstZ -contains "any") -or ($null -eq $ruleSrc) -or ($null -eq $ruleDst)
         if ($ruleLooksBroadEnoughToGeneralize) {
             for ($k = 0; $k -lt $i; $k++) {
                 $candidateEarlier = $enabledAll[$k]
-                if ($candidateEarlier.Action -eq $rule.Action) { continue }
+                if ($actionClass[$candidateEarlier.Index] -eq $ruleClass) { continue }
+                if ("$($candidateEarlier.Scope)" -ne $scopeKey) { continue }   # other VDOM / logical system / device
                 $candSrc = $parsedSrcAddr[$candidateEarlier.Index]
                 $candDst = $parsedDstAddr[$candidateEarlier.Index]
                 $candSrcZ = $lowerSrcZone[$candidateEarlier.Index]
@@ -1461,12 +1125,7 @@ function Invoke-DeterministicChecks {
                                        (Test-ListContains $rule.Service $candidateEarlier.Service)
                 if (-not $laterCoversEarlier2) { continue }
 
-                # Exclude the trivial case where both rules are actually
-                # identical on every field (both directions of containment
-                # hold): that pair is a genuine full shadow, not an
-                # asymmetric generalization, and belongs to the shadow
-                # check's territory even if this candidate pool happened to
-                # find it first.
+                # Identical rules are shadowing, not generalization.
                 $earlierCoversLater2 = (Test-ZonesCoveredFast -EarlierLower $candSrcZ -LaterLower $ruleSrcZ) -and
                                        (Test-ZonesCoveredFast -EarlierLower $candDstZ -LaterLower $ruleDstZ) -and
                                        (Test-NetworksContainFast $candSrc $ruleSrc) -and
@@ -1484,7 +1143,8 @@ function Invoke-DeterministicChecks {
         }
 
         if (($ruleSrcZ -contains "any") -or ($ruleDstZ -contains "any")) {
-            $wildcardIdx2.Add($i)
+            if (-not $wildcardIdx2.ContainsKey($scopeKey)) { $wildcardIdx2[$scopeKey] = New-Object System.Collections.Generic.List[int] }
+            $wildcardIdx2[$scopeKey].Add($i)
         }
         else {
             if (-not $sigBuckets2.ContainsKey($ruleSig)) { $sigBuckets2[$ruleSig] = New-Object System.Collections.Generic.List[int] }
@@ -1493,82 +1153,86 @@ function Invoke-DeterministicChecks {
     }
     Write-Progress -Activity "Analyzing ruleset" -Completed -Id 1
 
-    # Ruleset-wide check (not per-rule): PAN-OS's implicit default differs
-    # by scope. Interzone traffic (different zones) is denied by default,
-    # but INTRAZONE traffic (same zone to itself) is ALLOWED by default
-    # unless a rule overrides it. For an internet-facing zone specifically,
-    # that default-allow applies to traffic hitting the firewall's own
-    # external-facing interface. An explicit block for that zone talking to
-    # itself is standard hygiene to override the implicit allow with a
-    # deliberate decision instead. This looks for that rule ANYWHERE in the
-    # enabled ruleset (not strictly requiring it to be the literal last
-    # rule): what matters is that it exists and isn't itself shadowed by
-    # something broader placed after it, which the shadow checks above
-    # would already catch separately if that were the case.
-    #
-    # Accepts both "deny" and "drop" as satisfying it, but only recommends
-    # "drop" in the wording below. PAN-OS's "deny" uses the matched
-    # application's own default deny behavior, which for many apps still
-    # sends something back (a TCP reset, an ICMP unreachable). "Drop"
-    # silently discards the packet, no response at all, so an internet
-    # scanner learns nothing about whether anything is even listening
-    # there, this being exactly the perimeter case where that matters most.
-    $hasExplicitOutsideIntrazoneBlock = $false
-    foreach ($rule in $Rules) {
-        if ($rule.Disabled -or ($rule.Action -ne "deny" -and $rule.Action -ne "drop")) { continue }
-        $srcCoversInternetZone = ($rule.SrcZone -contains "any") -or (($rule.SrcZone | Where-Object { $InternetZoneSet -contains $_.Trim().ToLower() }).Count -gt 0)
-        $dstCoversInternetZone = ($rule.DstZone -contains "any") -or (($rule.DstZone | Where-Object { $InternetZoneSet -contains $_.Trim().ToLower() }).Count -gt 0)
-        if ($srcCoversInternetZone -and $dstCoversInternetZone -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
-            $hasExplicitOutsideIntrazoneBlock = $true
-            break
-        }
+    # PAN-OS allows intrazone traffic by default, so an internet zone needs
+    # an explicit block to itself. Any deny-type rule anywhere does; the text
+    # suggests drop, which (unlike deny) sends nothing back to a scanner.
+    # Other vendors: only zones that really allow intrazone traffic.
+    $intrazoneZones = @($InternetZoneSet)
+    if ($VendorContext) {
+        $allowZones = @($VendorContext.IntrazoneAllowZones)
+        $intrazoneZones = @($InternetZoneSet | Where-Object { $allowZones -contains $_ }) + @($allowZones | Where-Object { $InternetZoneSet -notcontains $_ -and (Test-ZoneNameInSet $_ $InternetZoneSet) })
     }
-    if (-not $hasExplicitOutsideIntrazoneBlock -and $InternetZoneSet.Count -gt 0) {
-        $findings += [PSCustomObject]@{
-            RuleName = "(ruleset-wide)"; Severity = "Low"; Type = "missing_explicit_intrazone_internet_deny"
-            Detail   = "No explicit block rule found for the internet-facing zone talking to itself (e.g. $($InternetZoneSet[0]) -> $($InternetZoneSet[0]), any application, drop). PAN-OS allows intrazone traffic by default unless a rule overrides it, unlike interzone traffic which is denied by default. Use 'drop', not 'deny': deny falls back to the matched application's own default deny behavior, which can still send a TCP reset or ICMP unreachable back, revealing that something is listening there. Drop silently discards the packet instead, giving an internet scanner nothing to work with."
+    # Several VDOMs / logical systems / devices: each one needs its own
+    # block rule, and only for the zones it actually uses.
+    $scopeNames = @($Rules | ForEach-Object { "$($_.Scope)" } | Select-Object -Unique)
+    $multiScope = $scopeNames.Count -gt 1
+    $intrazoneMissing = @()
+    foreach ($scopeName in $scopeNames) {
+        $scopeRules = if ($multiScope) { @($Rules | Where-Object { "$($_.Scope)" -eq $scopeName }) } else { $Rules }
+        $scopeZones = $intrazoneZones
+        if ($multiScope) {
+            $usedZones = @($scopeRules | ForEach-Object { @($_.SrcZone) + @($_.DstZone) } | ForEach-Object { $_.Trim().ToLower() } | Select-Object -Unique)
+            $scopeZones = @($intrazoneZones | Where-Object { $usedZones -contains $_ })
         }
-    }
-
-    # Ruleset-wide check (not per-rule): whether traffic that falls
-    # through to PAN-OS's implicit default deny actually gets logged
-    # depends on a device-level setting this CSV export has no visibility
-    # into. An explicit, broad deny/drop rule (any zone, any address, any
-    # application, any service) with logging turned on, kept as its own
-    # rule rather than relying on the implicit default, removes that
-    # uncertainty: every packet that doesn't match anything above it is
-    # now guaranteed to leave a record. Not itself a misconfiguration
-    # (this is why it's Low, not the Medium of no_logging_enabled, which
-    # flags a rule that's already known to be unlogged) - just a
-    # defense-in-depth gap worth pointing out.
-    #
-    # Only checked when this export has already been confirmed to carry
-    # real logging information somewhere ($anyRuleShowsLogging, computed
-    # once above): on an export type that never populates the Options
-    # column at all, no rule could ever "show logging evidence" no matter
-    # how it's configured, which would make this check fire on every
-    # single ruleset regardless of its actual setup - not a real signal.
-    #
-    # Looked for anywhere in the enabled ruleset, not strictly the literal
-    # last rule: what matters is that an unshadowed one exists, and the
-    # shadow checks above already catch the case where a broader rule
-    # placed after it would make it dead anyway.
-    if ($anyRuleShowsLogging) {
-        $hasExplicitLoggedCleanupDeny = $false
-        foreach ($rule in $Rules) {
-            if ($rule.Disabled -or ($rule.Action -ne "deny" -and $rule.Action -ne "drop")) { continue }
-            $ruleServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
-            if (($rule.SrcZone -contains "any") -and ($rule.DstZone -contains "any") -and
-                $null -eq $rule.SrcAddr -and $null -eq $rule.DstAddr -and $null -eq $rule.Application -and $ruleServiceEffectivelyAny -and
-                $rule.HasOptionsColumn -and $rule.Options -and ($rule.Options.ToLower() -match "$loggingPattern|$forwardingPattern")) {
-                $hasExplicitLoggedCleanupDeny = $true
+        if ($scopeZones.Count -eq 0) { continue }
+        $hasExplicitOutsideIntrazoneBlock = $false
+        foreach ($rule in $scopeRules) {
+            if ($rule.Disabled -or (Get-ActionClass $rule.Action) -ne "deny") { continue }
+            $srcCoversInternetZone = ($rule.SrcZone -contains "any") -or (@($rule.SrcZone | Where-Object { Test-ZoneNameInSet $_.Trim().ToLower() $InternetZoneSet }).Count -gt 0)
+            $dstCoversInternetZone = ($rule.DstZone -contains "any") -or (@($rule.DstZone | Where-Object { Test-ZoneNameInSet $_.Trim().ToLower() $InternetZoneSet }).Count -gt 0)
+            if ($srcCoversInternetZone -and $dstCoversInternetZone -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
+                $hasExplicitOutsideIntrazoneBlock = $true
                 break
             }
         }
-        if (-not $hasExplicitLoggedCleanupDeny) {
+        if (-not $hasExplicitOutsideIntrazoneBlock) { $intrazoneMissing += @{ Scope = $scopeName; Zones = $scopeZones } }
+    }
+    if ($intrazoneMissing.Count -gt 0) {
+        $intrazoneZones = @($intrazoneMissing[0].Zones)
+        $intrazoneDetail = "No explicit block rule found for the internet-facing zone talking to itself (e.g. $($InternetZoneSet[0]) -> $($InternetZoneSet[0]), any application, drop). PAN-OS allows intrazone traffic by default unless a rule overrides it, unlike interzone traffic which is denied by default. Use 'drop', not 'deny': deny falls back to the matched application's own default deny behavior, which can still send a TCP reset or ICMP unreachable back, revealing that something is listening there. Drop silently discards the packet instead, giving an internet scanner nothing to work with."
+        if ($VendorContext -and $VendorContext.Vendor -eq 'fortios') {
+            $intrazoneDetail = "Internet-facing zone '$($intrazoneZones[0])' is configured with 'intrazone allow', so traffic between its member interfaces passes without any policy, and no explicit deny policy for that zone to itself was found. Unless this is intended, set 'intrazone deny' on the zone or add an explicit deny policy."
+        }
+        elseif ($VendorContext -and $VendorContext.Vendor -eq 'junos') {
+            # Only possible with default-policy permit-all.
+            $intrazoneDetail = "Security policies default-policy is permit-all, so traffic from internet-facing zone '$($intrazoneZones[0])' to itself (and every other flow no policy matches) is allowed without a policy, and no explicit deny policy for that zone to itself was found. Set 'security policies default-policy deny-all', or add an explicit deny policy from-zone $($intrazoneZones[0]) to-zone $($intrazoneZones[0])."
+        }
+        if ($multiScope) {
+            $intrazoneDetail += " Missing in: " + (($intrazoneMissing | ForEach-Object { "$($_.Scope) ($($_.Zones -join ', '))" }) -join '; ') + "."
+        }
+        $findings += [PSCustomObject]@{
+            RuleName = "(ruleset-wide)"; Severity = "Low"; Type = "missing_explicit_intrazone_internet_deny"
+            Detail   = $intrazoneDetail
+        }
+    }
+
+    # Whether the implicit default deny is logged is a device setting we
+    # can't see. A logged deny-all cleanup rule removes the doubt. Low,
+    # defense in depth. Only when the export carries logging info at all.
+    if ($anyRuleShowsLogging) {
+        $cleanupMissing = @()
+        foreach ($scopeName in $scopeNames) {
+            $scopeRules = if ($multiScope) { @($Rules | Where-Object { "$($_.Scope)" -eq $scopeName }) } else { $Rules }
+            $hasExplicitLoggedCleanupDeny = $false
+            foreach ($rule in $scopeRules) {
+                if ($rule.Disabled -or (Get-ActionClass $rule.Action) -ne "deny") { continue }
+                $ruleServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
+                if (($rule.SrcZone -contains "any") -and ($rule.DstZone -contains "any") -and
+                    $null -eq $rule.SrcAddr -and $null -eq $rule.DstAddr -and $null -eq $rule.Application -and $ruleServiceEffectivelyAny -and
+                    $rule.HasOptionsColumn -and $rule.Options -and ($rule.Options.ToLower() -match "$loggingPattern|$forwardingPattern")) {
+                    $hasExplicitLoggedCleanupDeny = $true
+                    break
+                }
+            }
+            if (-not $hasExplicitLoggedCleanupDeny) { $cleanupMissing += $scopeName }
+        }
+        if ($cleanupMissing.Count -gt 0) {
+            $cleanupWhere = if ($multiScope) { "in $($cleanupMissing.Count) of the $($scopeNames.Count) policies in this export" } else { "anywhere in the ruleset" }
+            $cleanupDetail = "No explicit, broad deny/drop rule (any zone, any address, any application, any service) with logging enabled was found $cleanupWhere. Whether traffic that falls through to the implicit default deny actually gets logged depends on a device setting this export has no visibility into. A dedicated cleanup rule at the bottom of the rulebase, deny any/any/any with logging on, removes that uncertainty and guarantees a record of everything that didn't match an explicit rule above it."
+            if ($multiScope) { $cleanupDetail += " Missing in: $($cleanupMissing -join ', ')." }
             $findings += [PSCustomObject]@{
                 RuleName = "(ruleset-wide)"; Severity = "Low"; Type = "no_explicit_deny_log_rule"
-                Detail   = "No explicit, broad deny/drop rule (any zone, any address, any application, any service) with logging enabled was found anywhere in the ruleset. Whether traffic that falls through to the implicit default deny actually gets logged depends on a device setting this export has no visibility into. A dedicated cleanup rule at the bottom of the rulebase, deny any/any/any with logging on, removes that uncertainty and guarantees a record of everything that didn't match an explicit rule above it."
+                Detail   = $cleanupDetail
             }
         }
     }
