@@ -15,6 +15,10 @@
 . (Join-Path $PSScriptRoot 'Junos.ps1')
 . (Join-Path $PSScriptRoot 'PanUsage.ps1')
 . (Join-Path $PSScriptRoot 'Tufin.ps1')
+. (Join-Path $PSScriptRoot 'CloudCommon.ps1')
+. (Join-Path $PSScriptRoot 'AzureNsg.ps1')
+. (Join-Path $PSScriptRoot 'AwsSg.ps1')
+. (Join-Path $PSScriptRoot 'GcpFirewall.ps1')
 
 function Get-InputVendor {
     # Looks at the content, not the extension (exports get renamed a lot).
@@ -34,6 +38,14 @@ function Get-InputVendor {
     # PAN-OS: the header names the zone and address columns.
     $firstLine = (($head -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
     if ($firstLine -match '(?i)Source Zone' -and $firstLine -match '(?i)Destination Address' -and $firstLine -match ',') { return 'paloalto-csv' }
+    # Cloud exports (JSON from the az / aws / gcloud CLIs). A CLI warning
+    # line may come before the JSON. A line opening a JSON array or object,
+    # not a Markdown link ("[![...").
+    if ($head -match '(?m)^\s*(\[\s*$|\{\s*$|\[\s*\{|\{\s*")') {
+        if (Test-AwsSgJson $head) { return 'aws' }
+        if (Test-GcpFirewallJson $head) { return 'gcp' }
+        if (Test-AzureNsgJson $head) { return 'azure' }
+    }
     if ($head.TrimStart() -match '^[\[{]' -and $head -match '"policyid"') { return 'fortios-hitcount' }
     if ($head -match '(?m)^\s*Index\s+From zone\s+To zone\s+Name') { return 'junos-hitcount' }
     if ($firstLine -match '(?i)Hit Count|Rule Usage' -and $firstLine -match '(?i)(^|[,"])Name([,"]|$)') { return 'paloalto-usage' }
@@ -64,6 +76,9 @@ function Import-FirewallConfig {
         'fortios' { $model = ConvertFrom-FortiOS -Path $Path -UsageJson $HitCountFile -AppMapCsv $AppMapCsv }
         'junos' { $model = ConvertFrom-Junos -Path $Path -HitCountFile $HitCountFile -AppMapCsv $AppMapCsv }
         'tufin' { $model = ConvertFrom-Tufin -Path $Path }
+        'azure' { $model = ConvertFrom-AzureNsg -Path $Path }
+        'aws' { $model = ConvertFrom-AwsSg -Path $Path }
+        'gcp' { $model = ConvertFrom-GcpFirewall -Path $Path }
         default { throw "No importer for vendor '$Vendor'." }
     }
     $objects = @{}
@@ -106,7 +121,7 @@ function ConvertTo-MooseAltoRules {
         # Panorama-only verdict; zero hits are covered by zero_hit_count.
         $usage = ''
 
-        $rules += [PSCustomObject]@{
+        $obj = [PSCustomObject]@{
             Index             = $i
             Name              = $name
             LocalName         = "$($r.LocalName)"
@@ -138,6 +153,17 @@ function ConvertTo-MooseAltoRules {
             Scope             = $r.Scope
             LastHitMeansHit   = [bool]($r.PSObject.Properties['LastHitMeansHit'] -and $r.LastHitMeansHit)
         }
+        # Cloud importers decide internet exposure themselves (see
+        # Test-RuleSideIsInternet). Other rules don't get the fields at all.
+        if ($r.PSObject.Properties['SrcIsInternet']) {
+            $obj | Add-Member -NotePropertyName SrcIsInternet -NotePropertyValue ([bool]$r.SrcIsInternet)
+            $obj | Add-Member -NotePropertyName DstIsInternet -NotePropertyValue ([bool]$r.DstIsInternet)
+        }
+        # A service tag modeled as addresses (Azure Internet) keeps its own
+        # name in the report text.
+        if ($r.PSObject.Properties['SrcDisplay'] -and $r.SrcDisplay) { $obj.SrcAddrRaw = $r.SrcDisplay }
+        if ($r.PSObject.Properties['DstDisplay'] -and $r.DstDisplay) { $obj.DstAddrRaw = $r.DstDisplay }
+        $rules += $obj
         $i++
     }
     return $rules
