@@ -62,6 +62,10 @@
         NGFW policy-based mode
       * Juniper SRX: "show configuration | display set" (recommended) or
         the hierarchical configuration text, root and logical systems
+      * Azure Network Security Groups: "az network nsg list -o json"
+      * AWS security groups: "aws ec2 describe-security-groups"
+      * Google Cloud VPC firewall rules: "gcloud compute firewall-rules list
+        --format=json"
     The vendor is detected from the file content. A configuration passed to
     -InputCsv by mistake is detected and handled the same way.
 .PARAMETER AnalyzeFindingsCsv
@@ -203,7 +207,7 @@ if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
 # Banner. Always shown, whether or not parameters were supplied.
 # --------------------------------------------------------------------------
 
-$script:MooseAltoVersion = "3.0"
+$script:MooseAltoVersion = "4.0"
 
 function Show-Banner {
     $lines = @(
@@ -261,7 +265,7 @@ function Get-SetupVendor([string]$Path) {
     # flow reports the problem later.
     if (-not $Path -or -not (Test-Path -Path $Path -PathType Leaf)) { return 'paloalto-csv' }
     $v = Get-InputVendor -Path $Path
-    if ($v -notin @('paloalto-csv', 'fortios', 'junos', 'tufin')) { return 'paloalto-csv' }
+    if ($v -notin @('paloalto-csv', 'fortios', 'junos', 'tufin', 'azure', 'aws', 'gcp')) { return 'paloalto-csv' }
     return $v
 }
 
@@ -330,6 +334,7 @@ function Get-HitCountPrompt([string]$Vendor) {
         'fortios' { return "Hit counter file: FortiGate monitor API JSON (firewall/policy, or firewall/security-policy in NGFW mode)" }
         'junos' { return "Hit counter file: output of 'show security policies hit-count'" }
         'tufin' { return "Hit counter file: not used with a Tufin export (its Last Hit column is read)" }
+        { $_ -in @('azure', 'aws', 'gcp') } { return "Hit counter file: not used with a cloud export (cloud rules keep no hit counters)" }
         default { return "Rule usage CSV (Policy Optimizer export); when given, its Hit Count / Last Hit / Rule Usage replace the ones in the rules CSV" }
     }
 }
@@ -379,10 +384,11 @@ if ($menuChoice -eq "1") {
 
     # Ask until we get something readable. A hit counter file given here is
     # kept as such, and we ask for the configuration.
-    $vendorLabel = @{ 'paloalto-csv' = 'Palo Alto CSV export'; 'fortios' = 'FortiGate configuration'; 'junos' = 'Juniper SRX configuration'; 'tufin' = 'Tufin SecureTrack Rule Viewer export' }
+    $vendorLabel = @{ 'paloalto-csv' = 'Palo Alto CSV export'; 'fortios' = 'FortiGate configuration'; 'junos' = 'Juniper SRX configuration'; 'tufin' = 'Tufin SecureTrack Rule Viewer export'
+        'azure' = 'Azure NSG export'; 'aws' = 'AWS security group export'; 'gcp' = 'Google Cloud firewall rules export' }
     while ($true) {
         while (-not $InputCsv) {
-            $InputCsv = Read-HostPath "File to analyze: PAN-OS CSV export, FortiGate or Juniper SRX config, Tufin Rule Viewer export (required)"
+            $InputCsv = Read-HostPath "File to analyze: PAN-OS CSV export, FortiGate or Juniper SRX config, Tufin Rule Viewer export, Azure NSG / AWS SG / GCP firewall JSON (required)"
         }
         $InputCsv = $InputCsv.Trim().Trim('"')
         if (-not (Test-Path -Path $InputCsv -PathType Leaf)) {
@@ -403,7 +409,7 @@ if ($menuChoice -eq "1") {
                 $detected = 'paloalto-csv'
             }
             else {
-                Write-Host "Format not recognized: not a PAN-OS CSV export, a FortiGate configuration or a Juniper SRX configuration." -ForegroundColor Yellow
+                Write-Host "Format not recognized: not a PAN-OS CSV export, a FortiGate or Juniper SRX configuration, or an Azure / AWS / GCP export." -ForegroundColor Yellow
                 $InputCsv = ""; continue
             }
         }
@@ -434,7 +440,7 @@ if ($menuChoice -eq "1") {
         if ($inputVal) { $AddressGroupsCsv = $inputVal }
     }
 
-    if ($setupVendor -ne 'tufin') {
+    if ($setupVendor -notin @('tufin', 'azure', 'aws', 'gcp')) {
         $hitDefault = if ($HitCountFile) { $HitCountFile } else { 'none' }
         $inputVal = Read-HostPath "$(Get-HitCountPrompt $setupVendor), optional [$hitDefault]"
         if ($inputVal) { $HitCountFile = $inputVal.Trim().Trim('"') }
@@ -497,7 +503,7 @@ if ($menuChoice -eq "1") {
         $setupVendor = Get-SetupVendor $InputCsv
         $paramOrder = @("InputCsv", "OutHtml", "OutCsv", "InternetZones", "CriticalZones")
         if ($setupVendor -eq 'paloalto-csv') { $paramOrder += @("AddressObjectsCsv", "AddressGroupsCsv", "HitCountFile") }
-        else { $paramOrder += @("HitCountFile", "AppMapCsv") }
+        elseif ($setupVendor -notin @('azure', 'aws', 'gcp')) { $paramOrder += @("HitCountFile", "AppMapCsv") }
         $paramOrder += @("StaleHitDays", "MaxAddressListSize", "NoSecurityProfileChecks", "CompareTo", "SkipLLM")
         if (-not $SkipLLM) { $paramOrder += @("ApiKey", "Model") }
         $paramPrompts.HitCountFile = Get-HitCountPrompt $setupVendor
@@ -825,7 +831,7 @@ function Invoke-AiStep {
                 $matchingFinding = $findings | Where-Object { $_.RuleName -eq $realName -and $_.Type -eq $sugg.type } | Select-Object -First 1
                 if ($matchingFinding) {
                     # "App-ID" is Palo Alto's term (same rule as Get-AppIdLabel).
-                    $appLabel = if ($script:SourceVendor -in @('fortios', 'junos')) { 'application' } else { 'App-ID' }
+                    $appLabel = if ($script:SourceVendor -in @('fortios', 'junos', 'azure', 'aws', 'gcp')) { 'application' } else { 'App-ID' }
                     $suggestionText = "AI guess (verify): $appLabel '$($sugg.suggested_application)'. $($sugg.reasoning)"
                     $matchingFinding | Add-Member -NotePropertyName SuggestedFix -NotePropertyValue $suggestionText -Force
                 }
@@ -897,6 +903,24 @@ function Set-VendorPresentation {
             Role   = "You are a Juniper SRX / Junos firewall policy review assistant"
             Hint   = "zone behind the default route"
             Prompt = "`n`nThe ruleset was imported from a Juniper SRX configuration into a Palo Alto`nstyle rule model: zones are SRX security zones, applications are AppSecure`ndynamic applications, and a Service of `"application-default`" means`n`"match application junos-defaults`". Phrase every recommendation in Junos`nterms (security policies, address books, applications and application`nsets, AppSecure dynamic-application, IDP / UTM / security intelligence`napplication services), not in PAN-OS specific terms such as App-ID or`nApplipedia.`n"
+        }
+        azure = @{
+            Title  = "MooseAlto: Azure Network Security Group Hygiene Report"
+            Role   = "You are an Azure network security group (NSG) review assistant"
+            Hint   = "Internet service tag and 0.0.0.0/0"
+            Prompt = "`n`nThe ruleset was imported from Azure Network Security Groups into a Palo Alto`nstyle rule model: each rule name is `"<nsg>/<rule>`", the zone on the protected`nside is the NSG name, and the other side is `"internet`" (Internet tag, * or`n0.0.0.0/0), `"vnet`" (VirtualNetwork tag) or `"(no zone)`" (specific prefixes,`nservice tags as names, application security groups as asg:<name>). Rules tagged`nazure-default are the built-in default rules. NSGs match ports only: there are`nno applications and no security profiles. Phrase every recommendation in Azure`nterms (NSG rules and priorities, service tags, application security groups,`nAzure Firewall or a network virtual appliance for inspection, Azure Bastion or`nJust-in-time VM access for management ports, NSG flow logs), not in PAN-OS terms.`n"
+        }
+        aws = @{
+            Title  = "MooseAlto: AWS Security Group Hygiene Report"
+            Role   = "You are an AWS security group review assistant"
+            Hint   = "0.0.0.0/0 and ::/0"
+            Prompt = "`n`nThe ruleset was imported from AWS EC2 security groups into a Palo Alto style`nrule model: each rule name is `"<group>/<in|out> <service>`", the zone on the`nprotected side is the group name, and the other side is `"internet`" (0.0.0.0/0,`n::/0) or `"(no zone)`" (specific CIDRs, other groups as sg:<name>, prefix lists`nas pl:<id>). Security groups only allow and have no rule order. A rule tagged`naws-default-egress is the default all-traffic egress rule. Phrase every`nrecommendation in AWS terms (security group rules, referencing security groups`ninstead of CIDRs, managed prefix lists, network ACLs, AWS Network Firewall for`ninspection, Systems Manager Session Manager instead of open SSH/RDP, VPC Flow`nLogs), not in PAN-OS terms.`n"
+        }
+        gcp = @{
+            Title  = "MooseAlto: Google Cloud VPC Firewall Hygiene Report"
+            Role   = "You are a Google Cloud VPC firewall rule review assistant"
+            Hint   = "0.0.0.0/0 and ::/0"
+            Prompt = "`n`nThe ruleset was imported from Google Cloud VPC firewall rules into a Palo Alto`nstyle rule model: each rule name is `"<network>/<rule>`", the zone on the`nprotected side is the VPC network, targets are tag:<name> or sa:<account>, and`nthe other side is `"internet`" (0.0.0.0/0, ::/0) or `"(no zone)`" (specific ranges,`nsource tags or service accounts). Rules tagged gcp-implied are the implied deny`ningress / allow egress rules. Rules match ports only: there are no applications`nand no security profiles. Phrase every recommendation in Google Cloud terms`n(firewall rule priorities, target tags versus target service accounts,`nhierarchical and network firewall policies, Identity-Aware Proxy TCP forwarding`nfor management ports, firewall rules logging, Cloud NGFW for inspection), not in`nPAN-OS terms.`n"
         }
     }[$Vendor]
     if ($vendorText) {
@@ -990,14 +1014,14 @@ if ($hitNote) {
     return
 }
 if ($InputConfig -and -not $inputVendor) {
-    Write-Host "ERROR: could not recognize the configuration format of $inputPath (supported: FortiGate / FortiOS, Juniper SRX)." -ForegroundColor Red
+    Write-Host "ERROR: could not recognize the configuration format of $inputPath (supported: FortiGate / FortiOS, Juniper SRX, Azure NSG, AWS security group and GCP firewall JSON exports)." -ForegroundColor Red
     return
 }
 if (-not $inputVendor) {
     # Any .csv is still read as PAN-OS (the parser warns about columns);
     # anything else is refused.
     if ($inputPath -notmatch '\.csv$') {
-        Write-Host "ERROR: $inputPath is not a PAN-OS CSV export, a FortiGate configuration or a Juniper SRX configuration." -ForegroundColor Red
+        Write-Host "ERROR: $inputPath is not a PAN-OS CSV export, a FortiGate or Juniper SRX configuration, or an Azure / AWS / GCP export." -ForegroundColor Red
         return
     }
     $inputVendor = 'paloalto-csv'
@@ -1007,6 +1031,10 @@ $processingStartTime = Get-Date
 
 if ($HitCountFile -and $inputVendor -eq 'tufin') {
     Write-Host "Note: -HitCountFile is not used with a Tufin export; its Last Hit column is read instead." -ForegroundColor Yellow
+    $HitCountFile = ""
+}
+if ($HitCountFile -and $inputVendor -in @('azure', 'aws', 'gcp')) {
+    Write-Host "Note: -HitCountFile is not used with a cloud export; cloud rules keep no hit counters, so the usage checks are skipped." -ForegroundColor Yellow
     $HitCountFile = ""
 }
 if ($HitCountFile -and -not (Test-Path -Path $HitCountFile -PathType Leaf)) {

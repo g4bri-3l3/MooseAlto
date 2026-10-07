@@ -25,14 +25,14 @@ optional AI-assisted summary (Gemini).
 | Palo Alto Networks (PAN-OS, Panorama) | security rulebase CSV export | `-InputCsv` |
 | Fortinet FortiGate (FortiOS 6.x, 7.x) | configuration file, optional hit counter JSON | `-InputConfig` |
 | Juniper SRX (Junos) | `display set` or hierarchical configuration, optional hit count output | `-InputConfig` |
-| Tufin SecureTrack | Rule Viewer CSV export (one file, many devices and vendors) | `-InputCsv` |
+| Microsoft Azure Network Security Groups | `az network nsg list -o json` | `-InputConfig` |
+| AWS EC2 security groups | `aws ec2 describe-security-groups` | `-InputConfig` |
+| Google Cloud VPC firewall rules | `gcloud compute firewall-rules list --format=json` | `-InputConfig` |
 
-Every vendor goes through the same checks. A FortiGate or SRX
-configuration, or a Tufin export, is first translated into the same rule
-model a PAN-OS export produces (see [Input formats](#input-formats)), so
-the checks themselves don't need to know where a rule came from. The few
-checks whose meaning really does depend on the platform (logging,
-intrazone traffic, usage data, App-ID wording) adapt to it.
+Every vendor goes through the same checks: FortiGate, SRX and cloud
+configurations are imported into the same rule model as a PAN-OS export
+(see [Input formats](#input-formats)), and the few checks whose meaning
+depends on the platform adapt to it.
 
 ## Example
 
@@ -56,10 +56,9 @@ Also, in
   Input format below
 - `fortigate_demo_30rules.conf` + `fortigate_demo_30rules_stats.json`, and
   `srx_demo_30rules.set` + `srx_demo_30rules_hitcount.txt`: the same 30
-  rules as `demo_30rules.csv`, written as a FortiGate (NGFW policy-based
-  mode) and as a Juniper SRX configuration, each with its hit counters.
-  Handy for trying `-InputConfig` and for comparing the three reports side
-  by side:
+  rules as `demo_30rules.csv`, as a FortiGate (NGFW policy-based mode)
+  and a Juniper SRX configuration with their hit counters, for trying
+  `-InputConfig`:
 
   ```powershell
   .\MooseAlto.ps1 -InputConfig examples\fortigate_demo_30rules.conf -HitCountFile examples\fortigate_demo_30rules_stats.json -CriticalZones "swift,cde"
@@ -67,14 +66,10 @@ Also, in
   ```
 - `corner_cases_1000.csv`, `fortigate_corner_cases_1000.conf` +
   `_stats.json`, `srx_corner_cases_1000.set` + `_hitcount.txt`: 1,000
-  rules written on purpose to trigger almost every check and its corner
-  cases, on all three vendors (see Consistency across vendors). Run them
-  with `-CriticalZones "swift,cde"`. The last hit dates are relative to
-  September 2026, so the number of `stale_last_hit` findings will keep
-  growing as time passes.
-- `objects_corner_rules.csv`, `objects_corner_objects.csv` and
-  `objects_corner_groups.csv`: a small ruleset built around tricky
-  address objects and groups (nested, empty, negated, ranges, fqdn).
+  rules written to trigger almost every check and its corner cases, on
+  all three vendors (see Testing). Run with `-CriticalZones "swift,cde"`.
+  The last hit dates are relative to September 2026, so `stale_last_hit`
+  grows as time passes.
 
 ## Design principle
 
@@ -133,12 +128,11 @@ internet, via zone name or a concrete public IP):
 - `no_security_profile_on_exposed_rule`: rule touches the internet
   (inbound or outbound) but has no security profile group applied (no
   threat prevention / antivirus / URL filtering inspection on that traffic).
-  If the firewall deliberately does no inspection because another device
-  takes care of it (a dedicated IPS, a proxy), run with
-  `-NoSecurityProfileChecks`, or answer N to the setup question about
-  security profiles: this check is skipped, Gemini is told not to
-  recommend security profiles, and the report says the check was turned
-  off. A saved report analyzed later remembers the setting.
+  Not run with `-NoSecurityProfileChecks` (or answering N to the setup
+  question about security profiles), for a firewall that does no
+  inspection because another device (an IPS, a proxy) does it; Gemini is
+  then told not to recommend security profiles, and the report says the
+  check was off. A saved report analyzed later keeps the setting.
 - `negated_rfc1918_effectively_public`: an address field negates all
   three private RFC1918 ranges (e.g. `[Negate] 10.0.0.0/8;[Negate]
   172.16.0.0/12;[Negate] 192.168.0.0/16`), which is functionally
@@ -214,13 +208,11 @@ default since this is entirely org-specific):
   rule with equal-or-broader scope. Unlike same-action shadowing, this
   changes what the traffic actually does: the deny never fires, so
   whatever it was meant to block is actually permitted by the earlier
-  rule. A false sense of security, not just dead policy. A PAN-OS `drop`
-  or `reset-client` / `reset-server` / `reset-both` counts as a deny here
-  (and in every other check), since they all block the traffic, just with
-  a different reply. Only the first earlier rule covering the deny
-  matters: if that one is itself a deny, the traffic is already blocked
-  there, and a broader allow further down doesn't change anything, so
-  nothing is reported.
+  rule. A false sense of security, not just dead policy. Here and in
+  every other check, a PAN-OS `drop` or `reset-client` / `reset-server` /
+  `reset-both` action counts as deny. Only the first earlier rule that
+  covers the deny counts: if that one is itself a deny, a broader allow
+  further down doesn't change anything and nothing is reported.
 - `deny_shadows_allow`: the mirror case: an ALLOW rule fully covered by
   an **earlier DENY** rule. The allow exception never fires, so the
   traffic it was meant to permit stays blocked. Not a security exposure.
@@ -252,11 +244,10 @@ default since this is entirely org-specific):
   risky. A distinct concern from `inbound_risky_port`/`internal_risky_port`,
   which only fire for ports on the high-risk list. The finding text notes
   when an involved port is also cleartext or otherwise high-risk.
-  On FortiGate it only fires when the policy has neither an application
-  match nor an application control profile (a profile already identifies
-  the application, so there's no gap to report), and the text recommends
-  application control; on SRX it recommends AppSecure (`match
-  dynamic-application`).
+  On FortiGate it fires on a policy with no application match and no
+  application control profile (a profile already identifies the
+  application), and recommends application control; on SRX it
+  recommends AppSecure (`match dynamic-application`).
 - `temporary_tag_but_broad_rule`: the rule name or its Tags contain a
   temp/POC/test/trial-like word (matched as a whole token split on `-`,
   `_`, space, or `.`, not a raw substring, so e.g. "Attempted-Migration"
@@ -281,11 +272,10 @@ default since this is entirely org-specific):
   ruleset with that zone as both source and destination and application
   unrestricted. Informational (Low): only matters if nothing else already
   covers it, and a broad `any -> any` deny, for instance, already
-  satisfies this and suppresses the finding. When one input holds several
-  firewalls (a Tufin export with many devices, a FortiGate with several
-  VDOMs, an SRX with logical systems), each one is checked on its own: a
-  block rule on one device doesn't cover another, and the finding lists
-  where it's missing. The same goes for `no_explicit_deny_log_rule`.
+  satisfies this and suppresses the finding. With several devices
+  (Tufin), VDOMs or logical systems in one input, each one is checked on
+  its own and the finding lists where the rule is missing; the same goes
+  for `no_explicit_deny_log_rule`.
 - `reaches_known_public_dns_resolver`: destination includes a well-known
   public DNS resolver (list below). Checked regardless of the rule's
   action being allow only, and independent of port/application, since
@@ -307,7 +297,7 @@ default since this is entirely org-specific):
 - `oversized_address_list`: source or destination lists more than -MaxAddressListSize (default 25) individual addresses. A rule with lot of individually-enumerated addresses is just as hard to audit as one with "any", even though nothing here literally says so. Several firewall audit checklists specifically call this out as its own finding, distinct from the any/none-based checks above.
 - `no_logging_enabled`: allow rule shows no evidence of logging in the Options field: neither "session start"/"session end" (PAN-OS's own logging settings) nor a Log Forwarding profile. Logging and forwarding are separate PAN-OS settings: a log entry is created locally on the firewall as soon as session start/end logging is on, regardless of whether a Log Forwarding profile also sends it elsewhere. Either signal alone is enough to not flag this, since a local, queryable audit trail already exists. Only checked when the Options column both exists AND has been confirmed to carry logging information somewhere in the ruleset; otherwise skipped entirely to avoid flagging every rule on an export type that doesn't include this detail in the first place.
 - `rule_name_action_mismatch`: the rule name suggests it denies/blocks traffic (a token like "deny", "block", "drop") but Action is actually allow, or vice versa (a name suggesting "allow"/"permit" on a rule that's actually deny/drop). Whoever reads the ruleset by name alone would reasonably draw the wrong conclusion about what a rule does. Checked by exact token, not substring; a name containing both a deny-style and an allow-style token is skipped as ambiguous rather than guessed at. Applies regardless of action (the one check in this file that needs to see deny/drop rules too, not just allow ones).
-- `generic_rule_name`: rule named after a generic template rather than what it actually controls, such as Rule 5, New Rule, Policy #12, or a bare number (matched in both English and Italian). This kind of name only works if the reader also knows the rule order; on its own it says nothing about the traffic. Low severity. Like `rule_name_action_mismatch` and the temporary keyword checks, it looks at the name as written on the firewall, not at the `<device>/`, `<vdom>/` or `(duplicate name #N)` that MooseAlto may add to keep names unique in the report.
+- `generic_rule_name`: rule named after a generic template rather than what it actually controls, such as Rule 5, New Rule, Policy #12, or a bare number (matched in both English and Italian). This kind of name only works if the reader also knows the rule order; on its own it says nothing about the traffic. Low severity. This check, `rule_name_action_mismatch` and the temporary keyword checks look at the rule's own name, without the `<device>/`, `<vdom>/` or `(duplicate name #N)` that MooseAlto adds to keep names unique.
 - `compliance_tag_without_critical_zone`: allow rule tagged with a compliance or critical scope keyword (pci, swift, cde, cscf, hipaa, phi, sox, ffiec, core banking, atm, hsm), matched as a whole tag token, whose source and destination zone are both outside the configured `-CriticalZones` set. Either the tag drifted from what the rule actually touches, or `-CriticalZones` is missing a zone the organization already considers in scope. Skipped when either zone is any, since any already reaches the critical zone among everything else. Only checked when `-CriticalZones` is configured, same gate as the two critical zone checks above.
 - `no_explicit_deny_log_rule`: ruleset wide, not tied to one rule. Looks for a broad deny or drop rule (any zone, any address, any application, any service) with logging enabled anywhere in the ruleset. Whether traffic caught by PAN-OS's implicit default deny is actually logged depends on a device setting outside this export's visibility; an explicit, logged cleanup rule removes that uncertainty. Only checked when the export has already been confirmed to carry real logging information somewhere, same gate as `no_logging_enabled` above, otherwise every ruleset would trigger it regardless of actual setup.
 
@@ -343,23 +333,22 @@ pop3, imap, snmp, ldap, ms-rdp, ms-sql-db, mysql, oracle, vnc, ms-ds-smb/smb,
 rsh, rlogin, pptp, postgres, redis, mongodb, elasticsearch-base, anydesk,
 teamviewer, logmein, logmein-gotomypc, splashtop, chrome-remote-desktop,
 dns-over-https. **Verify these names against App-ID database (https://applipedia.paloaltonetworks.com/).**
-On FortiGate, the importer translates FortiGuard application IDs into
-these same names (e.g. 15511, RDP, becomes `ms-rdp`), so the same list
-works unchanged; you can check FortiGuard IDs at
+On FortiGate, FortiGuard application IDs are translated to these same
+names by the importer (for example 15511 RDP becomes `ms-rdp`), so the
+list applies unchanged; verify FortiGuard IDs at
 https://www.fortiguard.com/appcontrol (see
-[FortiGate application control](#fortigate-application-control)). SRX
-AppSecure names are translated the same way (`junos:RDP` becomes
-`ms-rdp`, `junos:SSH` becomes `ssh`; see
-[Juniper SRX](#juniper-srx--inputconfig)). Findings on FortiGate and SRX
-rules say "application" rather than "App-ID", since App-ID is Palo
-Alto's own term.
+[FortiGate application control](#fortigate-application-control)). On SRX,
+AppSecure names are matched the same way (`junos:RDP` becomes `ms-rdp`,
+`junos:SSH` becomes `ssh`; see [Juniper SRX](#juniper-srx--inputconfig)).
+Findings on FortiGate and SRX rules say "application" instead of
+"App-ID".
 
 **Amplification prone UDP ports and applications checked:** 17 (QOTD), 19
 (Chargen), 123 (NTP), 137 (NetBIOS Name Service), 1900 (SSDP/UPnP), 5353
 (mDNS), 11211 (Memcached), plus the App-ID names ntp, ssdp, netbios-ns.
 Deliberately conservative: SNMP (161) and LDAP (389) are already covered by
 the high risk port list above and not duplicated here, and only high
-confidence App-ID names are included. **Verify these names against App-ID database (https://applipedia.paloaltonetworks.com/)**, same caveat as the high risk application list above. On FortiGate, `ntp` is matched through FortiGuard application 16270 (NTP), while SSDP and NetBIOS Name Service are matched by UDP port only. On SRX,
+confidence App-ID names are included. **Verify these names against App-ID database (https://applipedia.paloaltonetworks.com/)**, same caveat as the high risk application list above. On FortiGate, `ntp` is matched through FortiGuard application 16270 (NTP); SSDP and NetBIOS Name Service are matched by UDP port only. On SRX,
 `junos:NTP` and the other AppSecure names are matched by name.
 
 ## Comparing against a previous report
@@ -451,15 +440,14 @@ anything to Gemini:
 1. `Send the results (with IP addresses masked) to Gemini for additional
    analysis? (Y/N)`**: if no, the script stops here. If yes, every IP
    address is replaced with a consistent placeholder (`IP-MASKED-1`,
-   `IP-MASKED-2`, ...) before anything is sent. That covers IPv4 and IPv6,
-   with or without a prefix length, ranges, and addresses hidden inside
-   rule names, object names and tags, including the way object names
-   often spell them (`h_10.1.1.1`, `Host_10_1_1_1`, `net-192-168-10-0`).
-   As a last safety net, the whole request is scanned again with the same
-   patterns right before it leaves: if an address somehow slipped
-   through, nothing is sent and the run tells you so. When Gemini answers
-   about a masked rule name, the answer is matched back to the real rule
-   locally.
+   `IP-MASKED-2`, ...) before anything is sent: IPv4 and IPv6, with or
+   without a prefix length, ranges, and addresses inside rule names, object
+   names and tags, including the forms object names often use
+   (`h_10.1.1.1`, `Host_10_1_1_1`, `net-192-168-10-0`). Right before the
+   request leaves, the whole text is checked again with the same patterns:
+   if any address were still in it, nothing is sent and the run says so.
+   Answers that refer to a masked rule name are matched back to the real
+   rule locally.
 2. `Send all findings, or only internet-exposure-related ones? (A=All,
    I=Internet)`**: lets you scope what Gemini sees: everything, or only
    the internet-facing categories.
@@ -493,57 +481,56 @@ other.
 
 ### AI analysis of a saved report
 
-You don't have to run the AI step right away. It can also run later, on
-the findings CSV saved by an earlier run, without parsing or checking the
-ruleset again:
+The AI step can also run later, on a findings CSV saved by an earlier run,
+without parsing or checking the ruleset again:
 
 ```powershell
-# 1. wherever the exports are, even on a machine with no internet access
+# 1. anywhere the exports are, even without internet access
 .\MooseAlto.ps1 -InputCsv export.csv -SkipLLM -OutCsv report.csv -OutHtml report.html
 
 # 2. later, or on a machine that can reach Gemini (copy report.csv and report.context.json)
 .\MooseAlto.ps1 -AnalyzeFindingsCsv report.csv
 ```
 
-It's also option 2 of the menu shown when MooseAlto starts without
-parameters. A few situations where this helps:
+Also available as option 2 of the menu shown when MooseAlto starts
+without parameters. Useful when:
 
-- **Large rulesets.** The deterministic pass on 20,000 rules takes
-  minutes; the AI step on its saved CSV takes seconds, so you can retry
-  it without waiting all over again.
-- **Configurations that can't leave a network.** Run the analysis where
-  the exports live, offline, and move only the findings to a machine that
-  can reach Gemini.
-- **Reviewing what gets sent.** Open the CSV, delete rows or rename rules
-  before running the AI step. Deleted rows are not sent. And since
-  shadowing and anomaly findings quote other rules by name, a rule that
-  had findings in the original run but is no longer in the CSV (removed
-  or renamed) is masked as `RULE-WITHHELD-N` inside the text that is sent.
+- the ruleset is large (the deterministic pass on 20,000 rules takes
+  minutes; the AI step on its saved CSV takes seconds)
+- the analysis must run where the configurations live, with no internet
+  access, and only the findings may move to a machine that can reach
+  Gemini
+- you want to review what is sent: open the CSV, delete rows, or rename
+  rules before running the AI step. Removed rows are not sent, and the
+  name of a rule that had findings in the original run but is no longer
+  in the CSV (removed or renamed) is also masked (`RULE-WITHHELD-N`)
+  inside the text of the findings that are sent, since shadowing and
+  anomaly findings quote other rules by name.
 
 Every run writes `<report>.context.json` next to the findings CSV: the
 whole ruleset as analyzed, the Internet Exposure Inventory, the source
-vendor and the run settings. It stays on your machine and is never sent
-anywhere, but keep it together with the CSV (it holds the same addresses
-the CSV does). It's what lets the saved-report analysis rebuild the full
-report (summary cards, charts, table columns), ask the Tags question,
-and use the right vendor's wording in the prompt. Without it, for
-example on a report from MooseAlto 2.x, the analysis still works from
-the CSV alone, just with less: the summary only covers rules that have
-findings, there's no Tags question, and the Palo Alto prompt is used.
+vendor and the run settings. It is local only and never sent anywhere;
+keep it with the CSV (it holds the same addresses the CSV does). It lets
+the saved-report analysis rebuild the full report (summary cards, charts,
+table columns), offer the Tags question, and use the vendor's own
+wording in the prompt. Without it (for example a report from MooseAlto
+2.x) the analysis still runs on the CSV alone: the summary covers only
+rules with findings, there is no Tags question, and the Palo Alto prompt
+is used.
 
-In this mode the only output is the AI report, `<report>_ai.html` (or
-whatever `-OutHtml` says). No CSV is written (`-OutCsv` is ignored), and
-the input CSV is never touched. The AI report is only written when
-Gemini actually returns something: if you decline, if there's nothing to
-send, or if the call fails, nothing is written, since it would just be a
-copy of the report you already have. Suggested fixes and MITRE ATT&CK
-tags end up in the HTML findings table, and `-CompareTo` adds the trend
-narrative just like in a live run. The consent questions, the IP masking
-and the exclusion of disabled rules all work the same as above.
+The output is only the AI report, `<report>_ai.html` (or `-OutHtml`): no
+CSV of any kind is created (`-OutCsv` is ignored in this mode), and the
+input CSV is never modified. The AI report is written only when Gemini
+returns results: if the consent is declined, there is nothing to send, or
+the call fails, nothing is written (it would be a copy of the saved
+report). Suggested fixes and MITRE ATT&CK tags are in
+the HTML findings table. `-CompareTo` adds the trend narrative, as in a
+live run. The consent questions, IP masking and the
+exclusion of disabled rules are the same as above.
 
-After the AI step of a normal run, the findings CSV of that run also gets
-the two extra columns, **Suggested Fix** and **MITRE ATT&CK**, next to the
-HTML report. Offline runs never have them.
+After the AI step of a live run, the findings CSV of that run gets two
+more columns, **Suggested Fix** and **MITRE ATT&CK**, alongside the HTML
+report. Offline runs never have them.
 
 ## Input formats
 
@@ -559,15 +546,10 @@ rather than assuming a clean schema:
   within a single CSV cell, not `,` (since `,` is already the CSV
   delimiter). Zones can genuinely be multi-valued (e.g.
   `outside;zone-to-hub`).
-- Address values can be a plain CIDR/IP or an IP range
-  (`10.0.0.0-10.255.255.255`), both with real containment logic, a
-  `[Negate] ...` exclusion, or an address-object/group name. An object
-  name is compared by exact match unless you also pass the objects file
-  (see Address object / group resolution below).
-- A row with fewer fields than the header (a truncated line) is still
-  analyzed, with the missing cells read as empty, and a console warning
-  tells you which rules were affected. Same for a rule with an empty
-  Action, which is analyzed as allow.
+- Address values can be a plain CIDR/IP (real containment logic applies),
+  an IP range (`10.0.0.0-10.255.255.255`), a `[Negate] ...` exclusion, or
+  an address-object/group name. The latter three are kept as opaque
+  tokens (exact-match only), not resolved to true containment.
 - `Disabled` and `Rule Usage: Hit Count` columns are optional. Not every
   export type includes them (e.g. a plain rulebase config export vs. a
   rule-usage report). When absent, rules are assumed enabled and the
@@ -582,8 +564,7 @@ rather than assuming a clean schema:
 **Note on PAN-OS/Panorama version differences**: the core schema
 (including the blank leading column) has been confirmed against real
 exports from **PAN-OS 10**, **PAN-OS 11**, and **PAN-OS 12**.
-`palo12_4000_sample.csv` and `palo12_20000_sample.csv` match the PAN-OS 12
-schema exactly.
+`rules_paloalto_sample.csv` matches the PAN-OS 12 schema exactly. 
 Palo Alto's own documentation also confirms the core field names
 (Source Zone, Destination Zone, Application, etc.) have been stable
 across all the versions.
@@ -596,8 +577,7 @@ Zone`, `Source Address`, `Destination Zone`, `Destination Address`,
 `Application`, `Service`, `Action`) right after loading and prints an
 explicit warning if any are missing, rather than failing silently.
 
-See `demo_30rules.csv` for a working example that triggers a broad mix of
-the checks, and `corner_cases_1000.csv` for almost all of them.
+See `rules_paloalto_sample.csv` for a working example covering every check.
 For `zero_hit_count`, `stale_last_hit`, `rule_usage_unused`, and
 `rule_usage_partially_used` specifically, see `rules_usage_data_sample.csv`
 instead: a separate file with Hit Count/Last Hit/Rule Usage columns
@@ -605,14 +585,13 @@ instead: a separate file with Hit Count/Last Hit/Rule Usage columns
 plain security rulebase, so kept out of the main sample to avoid
 misrepresenting its schema; see https://docs.paloaltonetworks.com/ngfw/administration/monitoring/view-policy-rule-usage)
 
-**Separate rule usage file.** Often the usage data comes as its own
-export (Policy Optimizer, or any CSV with a `Name` column plus at least
-one of Hit Count, Last Hit, Rule Usage). Pass it with `-HitCountFile`:
-its values **replace** the ones in the rules CSV, for the columns it has
-and the rules it lists, matched by name (a `[Disabled] ` prefix is
-ignored). Rules it doesn't list keep whatever the rules CSV said. Names
-in the usage file that match no rule, and names listed twice, are
-reported on the console and not applied, rather than guessed at.
+**Separate rule usage file.** When the usage data comes as its own export
+(Policy Optimizer, or any CSV with a `Name` column plus any of Hit Count,
+Last Hit, Rule Usage), pass it with `-HitCountFile`. Its values **replace**
+the ones in the rules CSV, for the columns it has and the rules it lists,
+matched by name (a `[Disabled] ` prefix is ignored). Rules it does not list
+keep the rules CSV values; names it lists that match no rule, and names it
+lists twice, are reported on the console and not applied.
 
 ```powershell
 .\MooseAlto.ps1 -InputCsv rulebase.csv -HitCountFile rule_usage.csv -OutHtml report.html -OutCsv report.csv
@@ -620,25 +599,24 @@ reported on the console and not applied, rather than guessed at.
 
 ### Fortinet FortiGate (`-InputConfig`)
 
-A FortiOS 6.x or 7.x configuration: either a backup file (System >
-Configuration > Backup) or the output of `show full-configuration`.
-Single or multi VDOM, profile-based or NGFW policy-based mode all work.
-The vendor is recognized from the file content, not from the parameter
-or the extension, so a FortiOS file passed to `-InputCsv` (which is what
-happens through the interactive setup) is handled just the same.
+A FortiOS 6.x or 7.x configuration: a backup file (System > Configuration >
+Backup) or the output of `show full-configuration`. Single or multi VDOM,
+profile-based or NGFW policy-based mode. The vendor is detected from the
+file content, so a FortiOS file passed to `-InputCsv` (for example through
+the interactive setup) is handled the same way.
 
 ```powershell
 .\MooseAlto.ps1 -InputConfig fw01.conf -HitCountFile fw01_policy_stats.json `
   -OutHtml report.html -OutCsv report.csv -CriticalZones "cde,swift"
 ```
 
-Address objects, groups, VIPs and services are read straight from the
-configuration, so `-AddressObjectsCsv`/`-AddressGroupsCsv` aren't needed
-(they're ignored with a FortiOS input).
+Address objects, groups, VIPs and services are read from the configuration
+itself, so `-AddressObjectsCsv`/`-AddressGroupsCsv` are not needed (and are
+ignored with a FortiOS input).
 
-**Hit counters.** A configuration file never contains them, so they have
-to come from the monitor API. Save the response to a file and pass it
-with `-HitCountFile` (alias `-UsageJson`):
+**Hit counters.** A configuration file never contains them. Save the
+monitor API response to a file and pass it with `-HitCountFile` (alias
+`-UsageJson`):
 
 ```
 GET /api/v2/monitor/firewall/policy?vdom=root            (profile-based mode)
@@ -647,18 +625,15 @@ GET /api/v2/monitor/firewall/security-policy?vdom=root   (NGFW policy-based mode
 
 Older builds and some tools use the same path with a `/select` suffix
 (`/api/v2/monitor/firewall/policy/select`); the response is the same.
-`vdom=*` returns every VDOM in one JSON array, which is accepted as is, and
-so is a JSON array you put together yourself, one response per VDOM.
-
-Without a hit counter file, Hit Count and Last Hit simply stay blank and
-the usage checks don't run: a policy is never reported as having zero
-hits just because nobody gave MooseAlto the counters. The console tells
-you for how many policies a counter was found. If the file isn't JSON, or
-comes from the wrong endpoint (`policy` on an NGFW policy-based
-configuration, a common mix-up), the console says so and names the
-endpoint to use. `rule_usage_unused` and `rule_usage_partially_used` are
-Panorama's own verdicts and never fire on FortiGate; a policy without
-hits shows up as `zero_hit_count` instead.
+`vdom=*` returns every VDOM in one JSON array, which is accepted as is.
+One response, or a JSON array of several (one per VDOM). Without it, Hit
+Count and Last Hit stay blank and the usage checks don't run; they are
+never reported as zero hits. The console says for how many policies a
+counter was found; a file that is not JSON, or counters from the wrong
+endpoint (`policy` on an NGFW policy-based configuration), are reported
+with the endpoint to use instead. `rule_usage_unused` and
+`rule_usage_partially_used` are Panorama's own verdicts and never fire on
+FortiGate; a policy without hits is reported by `zero_hit_count`.
 
 **How FortiOS maps onto the rule model**
 
@@ -681,26 +656,22 @@ hits shows up as `zero_hit_count` instead.
 | interface `role wan`, SD-WAN zones | added to `-InternetZones` | printed on the console |
 | zone `intrazone allow` | intrazone check | `missing_explicit_intrazone_internet_deny` only for internet zones with `intrazone allow` (FortiOS blocks intrazone traffic by default) |
 
-In NGFW policy-based mode the rulebase is `config firewall security-policy`.
-The `config firewall policy` entries you'll also find in that mode only
-hold the SSL inspection and authentication pre-match, so they aren't
-analyzed as rules.
+In NGFW policy-based mode the rulebase is `config firewall security-policy`;
+the `config firewall policy` entries in that mode only hold the SSL
+inspection and authentication pre-match and are not analyzed as rules.
 
-Not everything in a FortiOS policy has an equivalent in the rule model.
-Whenever the translation loses information on a specific rule, it's
-written to `<report>_normalization.txt` next to the HTML report, so you
-know which findings to read with a bit more care: `exclude-member`
-groups, dynamic and SDN addresses, user and group restrictions, port
-ranges too large to expand, Internet Service destinations,
-`service-negate`, unknown application IDs, URL categories, and a negated
-`all` (a rule that can never match). If you want to see exactly what the
-import produced, `-ExportNormalized <folder>` writes the imported ruleset
-as PAN-OS style CSVs.
+Anything that loses information on a specific rule is written to
+`<report>_normalization.txt` next to the HTML report: `exclude-member`
+groups, dynamic and SDN addresses, user and group restrictions, port ranges
+too large to expand, Internet Service destinations, `service-negate`,
+unknown application IDs, URL categories, and a negated `all` (a rule that
+can never match). `-ExportNormalized <folder>` also writes the imported
+ruleset as PAN-OS style CSVs, for debugging an import.
 
 #### FortiGate application control
 
 FortiOS stores application matches as numeric FortiGuard IDs, never as
-names, so MooseAlto has to look each ID up. It tries, in this order:
+names. IDs are resolved in this order:
 
 1. the `config application name` table inside the configuration, when
    present (authoritative for that FortiGuard package)
@@ -712,29 +683,27 @@ names, so MooseAlto has to look each ID up. It tries, in this order:
    https://www.fortiguard.com/appcontrol; the others come from the public
    table above, which agrees with FortiGuard on every verified ID.
 
-The FortiGuard name is then rewritten the way the risky application list
+The FortiGuard name is then written the way the risky application list
 spells it (`RDP` becomes `ms-rdp`, `HTTP.BROWSER` becomes `web-browsing`),
-so every App-ID check works unchanged. An ID that isn't found anywhere
-becomes `fortiapp-<id>` and is listed in the normalization notes, so you
-can add it with `-AppMapCsv`.
+so every App-ID check applies unchanged. An unknown ID becomes
+`fortiapp-<id>` and is listed in the normalization notes.
 
 In profile-based mode, application control is a UTM profile
 (`application-list`) that filters traffic the policy already allows. It
-doesn't narrow what the policy itself matches, so Application stays any
-and the profile shows up in the Profile field instead.
+does not narrow what the policy matches, so Application stays any and the
+profile shows up in the Profile field instead.
 
-Sometimes a custom service's name is the only clue about what it carries
-(`AnyDesk-Support`, `TeamViewer`). For remote access and tunnelling tools
-the name is kept as an extra Service token, the same way a PAN-OS service
-object called `smtp-25` is read.
+On a custom service whose name identifies a remote access or tunnelling
+tool (`AnyDesk-Support`, `TeamViewer`), the name is kept as an extra
+Service token, the same way a PAN-OS service object called `smtp-25` is
+read.
 
 ### Juniper SRX (`-InputConfig`)
 
-A Junos configuration from an SRX, either as `show configuration | display
-set` (recommended: one statement per line, nothing to reconstruct) or as
-the hierarchical text shown by `show configuration`. Root and logical
-systems are both read, and the format is recognized from the file
-content.
+A Junos configuration from an SRX: `show configuration | display set`
+(recommended, one statement per line) or the hierarchical text shown by
+`show configuration`. Root and logical systems. The format is detected
+from the file content.
 
 ```powershell
 .\MooseAlto.ps1 -InputConfig srx01_set.txt -HitCountFile srx01_hitcount.txt `
@@ -742,11 +711,10 @@ content.
 ```
 
 **Hit counters.** Save the text output of `show security policies
-hit-count` and pass it with `-HitCountFile`. SRX doesn't export a last
-hit date, so `stale_last_hit` can't run on SRX; a policy without hits is
-reported by `zero_hit_count`. As with FortiGate, the console tells you
-for how many policies a counter was found, and warns you if the file is
-in some other layout.
+hit-count` and pass it with `-HitCountFile`. SRX exports no last hit
+date, so `stale_last_hit` does not run on SRX; a policy without hits is
+reported by `zero_hit_count`. The console says for how many policies a
+counter was found, and a file in another layout is reported.
 
 **How Junos maps onto the rule model**
 
@@ -767,35 +735,30 @@ in some other layout.
 | `default-policy permit-all` | an explicit trailing allow any rule | also makes intrazone traffic allowed |
 | zone behind the default route | added to `-InternetZones` | printed on the console |
 
-On SRX, traffic between two interfaces of the same zone needs a policy
-like any other (unless `default-policy permit-all` is set), so
-`missing_explicit_intrazone_internet_deny` doesn't apply there.
+Intrazone traffic on SRX needs a policy like any other (unless
+`default-policy permit-all`), so `missing_explicit_intrazone_internet_deny`
+does not apply. A policy name used in two zone pairs, which Junos allows,
+is reported as `<from>><to>/<name>`; with several logical systems every
+name is prefixed with its logical system. A zone name used by more than
+one logical system is written `<logical system>/<zone>`, as FortiGate
+does for VDOMs, so an internet facing `untrust` in one doesn't mark the
+`untrust` of another; a plain zone name in `-InternetZones` or
+`-CriticalZones` still matches both.
 
-Junos allows the same policy name in two different zone pairs; when that
-happens the rule is reported as `<from>><to>/<name>` so the two don't get
-mixed up. With several logical systems, every rule name is prefixed with
-its logical system. The same goes for zones: a zone name used by more
-than one logical system is written `<logical system>/<zone>` (just like
-FortiGate does for VDOMs), so an internet facing `untrust` in one logical
-system doesn't make the `untrust` of another one internet facing too. A
-plain zone name in `-InternetZones` or `-CriticalZones` still matches
-both, so you don't have to type the prefix.
-
-A small oddity worth knowing: `junos-vnc` is TCP 5800 (VNC over HTTP), not
-5900, so its name is kept as a service token too, otherwise the port alone
-wouldn't reveal VNC. AppSecure names that the built-in mapping spells
-differently can be added with `-AppMapCsv` (`id,name`, with id =
-`junos:NAME`).
+`junos-vnc` is TCP 5800 (VNC over HTTP), not 5900, so it is also kept as a
+service name token and still recognised as VNC. AppSecure names that the
+built-in mapping spells differently can be added with `-AppMapCsv`
+(`id,name`, with id = `junos:NAME`).
 
 Not read: configuration groups other than `junos-defaults` (a warning is
-printed if one of them contains security policies), NAT, and IPv6
-containment.
+printed if one contains security policies), NAT, and IPv6 containment.
 
 ### Risky ports and applications on FortiGate and SRX
 
 Every entry of the risky port, risky application and amplification lists
-was checked on all three vendors, with one inbound and one outbound rule
-for each port and each application. This is what comes out:
+is exercised on all three vendors by `tests/fixtures/risky_matrix.csv`
+(one inbound and one outbound rule per port and per application), run as a
+round trip in the regression:
 
 | Input | Risky ports | Risky applications |
 | --- | --- | --- |
@@ -804,25 +767,22 @@ for each port and each application. This is what comes out:
 | FortiGate profile-based (services only) | all | reported as `*_risky_port` through the application's port; remote access tools (AnyDesk, TeamViewer, LogMeIn, GoToMyPC, Splashtop, Chrome Remote Desktop) through the service name, as on PAN-OS |
 
 The one real gap is DNS over HTTPS in a policy without application
-control: on port 443 it just can't be told apart from ordinary HTTPS, on
-any vendor. The public DNS resolver check still catches it by
-destination. Predefined services (FortiOS defaults such as `RDP`, `RSH`,
-`DCE-RPC`, and SRX `junos-*`) are resolved to their ports, so a rule using
-one is checked exactly like a rule that names the port.
+control: on port 443 it cannot be told apart from ordinary HTTPS, on any
+vendor. The public DNS resolver check still covers it by destination.
+Predefined services (FortiOS defaults such as `RDP`, `RSH`, `DCE-RPC`,
+SRX `junos-*`) resolve to their ports, so a rule using one is checked the
+same as one using the port.
 
 ### Tufin SecureTrack Rule Viewer export (`-InputCsv`)
 
-If your firewalls are managed through Tufin, you don't need a separate
-export per device: the CSV exported by the SecureTrack Rule Viewer can
-hold many devices, of different vendors, and one report covers them all.
-
-The file is recognized from its header, a line naming `Device Name`,
+The CSV the SecureTrack Rule Viewer exports (tested against the R25-2
+column set) is recognized from its header: one line naming `Device Name`,
 `Rule Name`, `Source` and `Destination`, in any order and with any other
 columns around them, comma or semicolon separated. The report lines Tufin
-writes above the table are skipped; if they're missing (a trimmed file)
-the file is still read, with a note. There's no risk of a PAN-OS export
-being taken for a Tufin one: PAN-OS has `Name`, not `Rule Name`, and no
-`Device Name`.
+writes above it are skipped; when they are missing (a trimmed file) the
+file is still read, with a note. A PAN-OS export is never taken for a
+Tufin one (it has `Name`, not `Rule Name`, and no `Device Name`). One file can hold many devices of different
+vendors; one report covers them all.
 
 ```powershell
 .\MooseAlto.ps1 -InputCsv tufin_rules.csv -InternetZones "untrust,outside,wan1" -OutHtml report.html -OutCsv report.csv
@@ -845,22 +805,92 @@ being taken for a Tufin one: PAN-OS has `Name`, not `Rule Name`, and no
 | `ANY`, `ANY SERVICE`, `ANY APPLICATION`, `ANY URL CATEGORY`, `ANY SCHEDULE` | any | Tufin's placeholders |
 
 Not used: the PAN-OS `intrazone-default` / `interzone-default` rows (the
-intrazone default is already covered by
-`missing_explicit_intrazone_internet_deny` for the Palo Alto devices in
-the file), section title rows, and any column not listed in the table
-above, since the parser finds columns by name and ignores the rest.
-Source user, URL category and schedule restrictions can't be represented,
-so they're listed in the normalization notes instead.
+intrazone default is covered by `missing_explicit_intrazone_internet_deny`,
+for the Palo Alto devices of the file), section title rows, and every column not listed in the table above
+(the parser finds columns by name and ignores the others). Source
+user, URL category and schedule are listed in the normalization notes.
+`examples/tufin_rule_viewer_sample.csv` (from `tools/New-TufinSample.py`)
+is a synthetic export with five vendors.
 
-No sample file is included: use your own Rule Viewer export. The Rule
-Viewer only exports the columns shown on screen, so make sure at least
-the ones in the table above are visible before exporting.
+### Cloud firewall rules: Azure NSG, AWS security groups, Google Cloud (`-InputConfig`)
+
+The JSON the vendor CLI prints is read as is; the platform is recognized
+from the content, and a warning line the CLI prints before the JSON is
+skipped. MooseAlto reads the export only: it never calls a cloud API and
+needs no SDK or credentials, so the export can be taken by whoever has
+read access and analyzed anywhere.
+
+```powershell
+az network nsg list -o json > nsgs.json                                # Azure, one subscription
+aws ec2 describe-security-groups --output json > sgs.json              # AWS, one region
+gcloud compute firewall-rules list --format=json > firewall.json       # Google Cloud, one project
+
+.\MooseAlto.ps1 -InputConfig nsgs.json -CriticalZones "nsg-db" -OutHtml report.html -OutCsv report.csv
+```
+
+Also accepted: a single `az network nsg show`, the ARM REST or Resource
+Graph answer (rules under `properties`, a `value` or `data` wrapper), the
+bare `SecurityGroups` array, and the Compute REST answer (`items`).
+
+Cloud rules have no zones, so the import gives each rule two sides:
+
+| Side | Zone | Addresses |
+| --- | --- | --- |
+| protected (the NSG, security group or VPC network the rule belongs to) | the NSG / group / network name, `<resource group or VPC>/<name>` when the name is used twice | as written; "everything behind it" (`*`, `VirtualNetwork`, no target) is any |
+| remote (where traffic comes from, inbound, or goes to, outbound) | `any` | as written; `*`, `0.0.0.0/0` and `::/0` are any |
+
+The remote zone is always `any` so that rules are compared by address:
+a rule for `0.0.0.0/0` on port 22 covers one for `10.0.0.0/16` on port 22
+(`shadowed_rule`), whatever the names. Whether the remote side is the
+internet is decided by the importer, rule by rule: any address, a public
+IPv4 or IPv6 range, the Azure `Internet` and `AzureCloud` tags are
+internet; private ranges, `VirtualNetwork`, other service tags,
+application security groups (`asg:<name>`), referenced security groups
+(`sg:<name>`), prefix lists (`pl:<id>`), GCP tags and service accounts
+(`tag:<name>`, `sa:<account>`) are not. `-InternetZones` doesn't apply;
+`-CriticalZones` takes NSG, security group or network names.
+
+| | Azure NSG | AWS security group | GCP firewall |
+| --- | --- | --- | --- |
+| Rule name | `<nsg>/<rule>` | `<group>/<in\|out> <service>` (rules have no names; naming checks don't run) | `<network>/<rule>` |
+| Scope (pairwise checks stay inside it) | NSG + direction | group + direction | network + direction |
+| Order | priority | none: allow only, any match passes (a rule covered by another is redundant wherever it sits) | priority, deny first on a tie |
+| Platform rules | the six default rules, added at the end of each list; they can't be edited, so no finding is reported on them (custom rules are still compared with them) | the default all-traffic egress rule is a real rule; named `<group>/out all (default egress)` | implied deny ingress / allow egress, priority 65535, added at the end |
+| Protocols and ports | `Tcp`, `Udp`, `Icmp`, `Esp`, `Ah`, `*`; port ranges and lists | `tcp`, `udp`, `icmp` (type), `-1`, protocol numbers | `tcp`, `udp`, `icmp`, `all`, protocol names and numbers; ports and ranges |
+| Logging | not in the export | not in the export | `logConfig` (logging checks run) |
+| Disabled | no such state | no such state | `disabled` |
+
+The Azure `Internet` tag is the public address space, not everything: it
+is modeled as "not RFC1918" and shown as `Internet`, so it covers any
+public range but not `10.0.0.0/8`, and `AllowInternetOutBound` doesn't
+make `DenyAllOutBound` look dead. A deny-all from `Internet` placed above
+an allow from a private range is correctly not reported as shadowing it.
+
+Three checks don't run on cloud rules, because there is nothing to fix
+on the platform: `port_based_rule_missing_app_id` (cloud rules match
+ports only), `no_security_profile_on_exposed_rule` (no content inspection
+can be attached to them; put Azure Firewall, AWS Network Firewall or
+Cloud NGFW in front instead) and `negated_rfc1918_effectively_public` (a
+cloud rule can't negate; the negation is the model of the `Internet` tag).
+The hit counter checks are skipped too: cloud rules keep no hit
+counters.
+
+Notes written to the normalization file: NSGs associated with no subnet
+or network interface (their rules filter nothing today), source port
+restrictions (not represented), prefix lists and referenced groups
+(compared by name), public IPv6 ranges, `AzureCloud`, and GCP sources or
+destinations with no addresses to compare (FQDNs, region codes, threat
+intelligence lists, address groups: kept by name, never read as
+internet).
+
+`examples/azure_nsg_demo.json`, `aws_sg_demo.json` and
+`gcp_firewall_demo.json` (from `tools/New-CloudSamples.ps1`) are synthetic
+exports that trigger a broad mix of checks.
 
 ## Address object / group resolution (optional)
 
-This section is about the PAN-OS CSV input. With `-InputConfig`
-(FortiGate, SRX) there's nothing to pass: objects and groups are read
-from the configuration itself.
+This section applies to the PAN-OS CSV input; with `-InputConfig`
+(FortiGate, SRX), objects and groups come from the configuration itself.
 
 By default, address-object and address-group names in a rule (e.g. a rule
 whose source is `LAN-SERVER` rather than a literal CIDR) are treated as
@@ -877,26 +907,25 @@ know what a name means. Left as just the name when nothing resolved.
 
 - Nested groups are resolved recursively.
 - `ip-netmask` objects resolve to real CIDR containment logic, and
-  `ip-range` objects to their range, so they get the same analysis as a
-  range typed directly in the rule. `fqdn` and `ip-wildcard` objects, IPv6
-  addresses and dynamic (tag-match) groups can't be expressed as IPv4
-  intervals, so they're kept as clearly-labeled opaque tokens instead
-  (e.g. `Internal-DNS[fqdn]=dns.internal.corp`), with the same exact-match
-  treatment as an unresolved name.
+  `ip-range` objects to their range (the same analysis as a range written
+  in the rule). `fqdn` and `ip-wildcard` objects, IPv6 addresses and
+  dynamic (tag-match) groups can't be expressed as IPv4 intervals: they're
+  kept as clearly-labeled opaque tokens instead (e.g.
+  `Internal-DNS[fqdn]=dns.internal.corp`), same exact-match treatment as
+  an unresolved name.
 - A negated object or group (`[Negate] GUEST-G`) is resolved too, each
-  member keeping its negation, which is also how FortiGate and SRX write
-  it.
-- A group with no members becomes one opaque token (`G[empty-group]`),
-  never an empty field, which would otherwise read as "any".
+  member keeping the negation, as FortiGate and SRX write it.
+- A group with no members is one opaque token (`G[empty-group]`), never
+  an empty field.
 
-FortiGate and SRX objects go through exactly the same logic: their objects
-and groups (nested addrgrp / address-set, ranges, fqdn / dns-name,
-wildcards, VIPs and VIP groups, interface-subnet objects, zone and
-attached address books) are converted to this same model. That's why
-`examples/objects_corner_*.csv` gives the same findings on all three
-vendors (see Consistency across vendors). On FortiGate, `exclude-member`
-is ignored with a note (so the group reads wider than it really is), and
-geography, dynamic, MAC and SDN objects stay opaque.
+The same logic serves FortiGate and SRX: their objects and groups
+(including nested addrgrp / address-set, ranges, fqdn / dns-name,
+wildcard, VIPs and VIP groups, interface-subnet objects, zone and
+attached address books) are converted to this model, and
+`examples/objects_corner_*.csv` (from `tools/New-ObjectsCornerDataset.py`)
+gives the same findings on the three vendors (see Testing). FortiGate
+`exclude-member` is ignored with a note (the group reads wider than it
+is); geography, dynamic, MAC and SDN objects stay opaque.
 - The report's rule detail text still shows the **original object name**
   for readability. Only the underlying address comparison logic uses the
   resolved value.
@@ -1089,15 +1118,33 @@ lib/
     Junos.ps1          SRX semantics (policies, address books, applications)
     JunosConfig.ps1    Junos configuration reader (set and hierarchical)
     PanUsage.ps1       PAN-OS rule usage file applied over the rules CSV
+    Tufin.ps1          Tufin SecureTrack Rule Viewer export
+    CloudCommon.ps1    cloud rule sides, internet flag, protocols and ports
+    AzureNsg.ps1       Azure Network Security Groups
+    AwsSg.ps1          AWS security groups
+    GcpFirewall.ps1    Google Cloud VPC firewall rules
   SavedReport.ps1      run context file, AI analysis of a saved report
-examples/              sample rulesets, configurations and a demo report
+tests/
+  Invoke-Regression.ps1    everything below in one command
+  regression.json          reference datasets and expected finding counts
+  Test-FortiOSParser.ps1   FortiOS importer assertions on tests/fixtures
+  Test-JunosParser.ps1     SRX importer assertions on tests/fixtures
+  Test-TufinImport.ps1     Tufin import assertions
+  Test-CloudImport.ps1     Azure, AWS and GCP import and checks
+  Test-HitCountFiles.ps1   -HitCountFile end to end, every input type
+  Test-AiAnalysis.ps1      AI step live and from a saved report, Gemini simulated
+  Test-ParserFixes.ps1     actions, truncated rows, name prefixes, SRX addresses and zones
+  Invoke-RoundTrip.ps1     PAN-OS CSV vs the same rules as FortiOS or SRX config
+tools/
+  ConvertTo-FortiOSConfig.ps1  builds FortiOS test configs from a PAN-OS CSV
+  ConvertTo-JunosConfig.ps1    builds SRX test configs from a PAN-OS CSV
+  New-CloudSamples.ps1         writes the Azure, AWS and GCP demo exports
 ```
 
-**Adding a vendor** only takes a new importer in `lib/Importers/` that
-fills the model in `Common.ps1`; detection and reporting don't change at
-all. The model is then turned into the same rule objects
-`Import-PaloAltoRules` builds from a PAN-OS CSV, so every check sees the
-same kind of data wherever it came from.
+**Adding a vendor** means a new importer in `lib/Importers/` that builds
+the model in `Common.ps1`; detection and reporting don't change. The
+importer turns the model into the same rule objects `Import-PaloAltoRules`
+produces, so every check sees identical data whatever the source.
 
 **`lib/DetectionRules.ps1` is the file to edit** when adding or tuning a
 check. It holds the risky-port/App-ID lists and `Invoke-DeterministicChecks`,
@@ -1108,9 +1155,9 @@ works regardless of which directory you run the script from.
 
 If the script is launched with no `-InputCsv` (e.g. double-clicked instead of run from a command line), it
 walks through an interactive setup instead of erroring out. The questions
-depend on the file you give first: for a PAN-OS CSV it asks about address
-object/group files and a rule usage file, for a FortiGate or SRX
-configuration about its hit counter file and an application name map. Press Enter
+follow the file given first: a PAN-OS CSV asks for address object/group
+files and a rule usage file, a FortiGate or SRX configuration asks for its
+hit counter file and an application name map. Press Enter
 on any prompt to accept the default shown in `[brackets]`. Once a CSV path
 is known (via prompt or parameter), everything proceeds exactly the same
 way. The optional Gemini call shows a live spinner while waiting on the
@@ -1139,45 +1186,64 @@ if their zones are compatible), so a rule mostly only gets compared
 against others that could plausibly match rather than every earlier rule
 unconditionally.
 
-## Consistency across vendors
+## Testing
 
-The same rule should give the same finding whatever firewall it lives
-on. To check that, the example rulesets were converted from the PAN-OS
-CSV into equivalent FortiGate and SRX configurations (the `fortigate_*`
-and `srx_*` files in `examples/`), MooseAlto was run on each version, and
-the findings were compared rule by rule. On the address objects and
-groups set (`objects_corner_rules.csv`) all three vendors give exactly
-the same findings.
+```powershell
+.\tests\Invoke-Regression.ps1             # a few minutes
+.\tests\Invoke-Regression.ps1 -Extended   # adds the 4,000 and 5,000 rule datasets and the 1,000 rule round trips (about 12 minutes)
+```
 
-On the 30 rule demo, every difference is a platform difference, not a
-rule that got lost in the import: the usage verdicts only Panorama
-produces (`rule_usage_*`), last hit dates that SRX doesn't export
-(`stale_last_hit`), and the PAN-OS intrazone default allow, which FortiOS
-and SRX don't have. One extra finding shows up on both of them, because
-their configurations carry logging settings the PAN-OS CSV doesn't.
+Runs a syntax check on every script, the reference datasets in
+`tests/regression.json` (each must produce its exact expected finding
+count; add your own datasets there), the FortiOS, SRX, Tufin and cloud
+importer assertions, the hit counter files for every input type, the AI step
+(live and from a saved report, with a simulated Gemini response, so no
+API key or network is needed), and the round trips.
 
-One difference is worth knowing about if you're migrating a rulebase. On
-the 4,000 rule sample converted to SRX, a leading any to any rule has to
-become a global policy, and SRX evaluates global policies after every
-zone pair policy. So on SRX it no longer shadows the 2,895 rules it
-shadows on PAN-OS, and MooseAlto correctly stops reporting them: the two
-platforms really do order those rules differently.
+A round trip turns a PAN-OS CSV into an equivalent FortiOS or SRX
+configuration (`tools/`), runs MooseAlto on both, and compares the
+findings rule by rule. Every known difference is stored in
+`tests/expected/`; a new difference, or one that disappears, fails the run
+until it is reviewed. Current results:
 
-`corner_cases_1000.csv` triggers 42 of the 43 finding types with their
-corner cases: CIDR and range containment, negation, multi zone rules,
-reordered service lists, duplicate and unicode names, disabled rules,
-logging, usage data, hit counts above 2^31. Every difference that's left
-has an explanation. On FortiGate: the Panorama-only usage verdicts, and
-Redis/Elasticsearch, which have no FortiGuard signature and become port
-rules. On SRX: the same usage verdicts, the missing last hit dates, and
-rules with an any zone, which become global policies evaluated after the
-zone pair ones (so they no longer shadow or correlate with the rules
-after them). A profile-based FortiGate has no application match at all,
-so there every application finding becomes a port finding, by design.
+| Dataset | Target | PAN-OS findings | Reproduced |
+|---|---|---|---|
+| `demo_30rules.csv` | FortiGate NGFW | 110 | 96 |
+| `demo_30rules.csv` | SRX | 110 | 89 |
+| `corner_cases_1000.csv` | FortiGate NGFW | 1,471 | 1,427 |
+| `corner_cases_1000.csv` | SRX | 1,471 | 1,325 |
+| `objects_corner_rules.csv` (objects, groups) | FortiGate NGFW | 87 | 87 |
+| `objects_corner_rules.csv` (objects, groups) | SRX | 87 | 87 |
 
-Keep in mind that the converted configurations use idealized syntax:
-they show that the rule semantics survive the import, but a real export
-from your own firewall is still the final check.
+Every difference on the demo is a platform difference, not a lost rule:
+usage verdicts that only Panorama produces (`rule_usage_*`), last hit
+dates that SRX does not export (`stale_last_hit`), and the PAN-OS
+intrazone default allow, which FortiOS and SRX do not have by default. One extra finding
+appears on both, because their configurations carry logging settings
+that the PAN-OS CSV does not.
+
+On the 4,000 rule sample converted to SRX, a leading any to any rule has
+to become a global policy, which SRX evaluates after every zone pair
+policy: it no longer shadows the 2,895 rules it shadows on PAN-OS, and
+MooseAlto correctly stops reporting them. A real difference in how the
+two platforms order rules, worth knowing when migrating a rulebase.
+
+`corner_cases_1000.csv` (generated by `tools/New-CornerCaseDataset.py`)
+triggers 42 of the 43 finding types with their corner cases: CIDR and
+range containment, negation, multi zone rules, reordered service lists,
+duplicate and unicode names, disabled rules, logging, usage data, hit
+counts above 2^31. Every difference left is explained: on FortiGate, the
+Panorama-only usage verdicts and Redis/Elasticsearch, which have no
+FortiGuard signature and become port rules; on SRX, the same usage
+verdicts, last hit dates that SRX does not export, and rules with any
+zone, which become global policies evaluated after the zone pair
+policies (so they no longer shadow or correlate with the rules after
+them). The profile-based FortiGate conversion (`ports`) turns every
+application into its port, so application findings become port findings
+by design.
+
+The generated configurations use idealized syntax. They prove the rule
+semantics survive the import; real exports are still the final check.
 
 ## Requirements
 
@@ -1186,10 +1252,11 @@ Windows PowerShell 5.1 or PowerShell 7+, no external modules needed.
 ## Usage
 
 In the interactive setup (run with no parameters), every question that
-asks for a file or folder completes with **Tab**, like a normal shell:
-type the first letters and press Tab to cycle through the matching files
-and folders (Shift+Tab goes back, another Tab enters a completed folder,
-Esc clears the line). No quotes needed, even with spaces in the path.
+asks for a file or folder completes with **Tab**: type the first letters
+and press Tab to cycle through the matching files and folders of that
+folder (Shift+Tab goes back, a folder completed with Tab can be entered
+with another Tab, Esc clears the line). Quotes are not needed, even with
+spaces in the path.
 
 ```powershell
 $env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
@@ -1227,8 +1294,10 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
 # Juniper SRX ("show configuration | display set"), with hit counts:
 .\MooseAlto.ps1 -InputConfig srx01_set.txt -HitCountFile srx01_hitcount.txt -OutHtml report.html -OutCsv report.csv
 
-# Tufin SecureTrack Rule Viewer export, many devices in one report:
-.\MooseAlto.ps1 -InputCsv tufin_rules.csv -InternetZones "untrust,outside,wan1" -OutHtml report.html -OutCsv report.csv
+# Azure NSGs, AWS security groups, Google Cloud firewall rules (CLI JSON):
+.\MooseAlto.ps1 -InputConfig nsgs.json -CriticalZones "nsg-db" -OutHtml report.html -OutCsv report.csv
+.\MooseAlto.ps1 -InputConfig sgs.json -OutHtml report.html -OutCsv report.csv
+.\MooseAlto.ps1 -InputConfig firewall.json -OutHtml report.html -OutCsv report.csv
 ```
 ## Known limitations
 
@@ -1237,29 +1306,30 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
   interface, pass `-InternetZones` explicitly, or internet-exposure checks
   will under-report.
 - **IPv4 only.** Containment (used by shadow/duplicate detection) does real interval math for plain CIDR/IP and "IP-IP" ranges, including mixing the two (e.g. correctly detecting that a range is fully inside a broader CIDR). A [Negate] X broader side (or multiple, which combine with AND semantics, matching only if the address avoids all of them) is also handled against a plain CIDR/range narrower side: covered if the narrower interval has zero overlap with every excluded range. Two narrower cases still fall back to exact string match rather than true containment: a [Negate] narrower side (rare enough in practice not to be worth the added complexity), and comparing two different negated expressions to each other (identical ones still match exactly, just not a genuinely different-but-overlapping pair). Address-object names are also exact-match, but only actually matters when -AddressObjectsCsv isn't supplied: when it is, names are resolved to real addresses before any comparison happens.
-- **Tufin export: the column set isn't publicly documented.** The parser
-  finds columns by name, ignoring case and spaces, so column order and
-  extra columns don't matter. The Rule Viewer only exports the columns
-  shown on screen, though. If `Device Name`, `Rule Name`, `Source`,
-  `Destination`, `Service` or `Action` is missing, the import stops and
-  tells you which columns to add. Any other useful column that's missing
-  (zones, `Disabled`, the Negated columns, `Application`, `Security
-  Profiles`, `Logged`, `Last Hit`) is listed on the console and in the
-  normalization notes, together with what it changes, and the checks that
-  need it are skipped instead of running on empty values. If a future
-  Tufin version renames a column, it shows up the same way.
+- **Tufin export: column set not publicly documented.** The parser is
+  built on the R25-2 Rule Viewer header and finds columns by name,
+  ignoring case and spaces, so column order and extra columns do not
+  matter. The Rule Viewer exports the columns shown on screen: if
+  `Device Name`, `Rule Name`, `Source`, `Destination`, `Service` or
+  `Action` is missing the import stops with the column names to add; any
+  other useful column that is missing (zones, `Disabled`, the Negated
+  columns, `Application`, `Security Profiles`, `Logged`, `Last Hit`) is
+  listed on the console and in the normalization notes with what it
+  changes, and the checks that depend on it are skipped rather than run on
+  empty values. A renamed column in a future Tufin version shows up the
+  same way.
 - **Tufin export: objects and groups are names only.** The Rule Viewer
-  CSV carries the name of each address object or group, not what's inside
-  it, and MooseAlto can't resolve them (`-AddressObjectsCsv` /
-  `-AddressGroupsCsv` are ignored with a Tufin input). Two rules using the
-  same object are still compared correctly. But a host object inside a
-  network object, or a group containing another rule's object, isn't seen
-  as covered, so shadowing and duplicates between different objects are
-  missed, and whether an object is public (internet exposure) can only be
-  guessed from the zone. IPs, CIDRs and ranges written directly in the
-  cell are analyzed normally. On platforms without zones (Check Point),
-  this means a rule between two named objects is never reported as
-  internet facing.
+  CSV carries the name of each address object or group, not its members
+  or addresses, and MooseAlto does not resolve them (`-AddressObjectsCsv`
+  / `-AddressGroupsCsv` are ignored with a Tufin input). Two rules using
+  the same object are compared correctly; a host object inside a network
+  object, or a group containing another rule's object, is not seen as
+  covered, so shadowing and duplicates between different objects are
+  missed, and whether an object is public (internet exposure) is only
+  known from the zone. Literal IPs, CIDRs and ranges written in the cell
+  are analyzed normally. On zoneless platforms (Check Point) a rule
+  between two named objects is therefore never reported as internet
+  facing.
 - **Direction- and exposure-related checks treat zone="any" as weaker
   evidence than a specifically-named zone.** If the address field on
   that same side is exclusively a plain, non-negated, specific
@@ -1285,15 +1355,40 @@ The same applies to the FortiGuard application ID table used for
 FortiGate: IDs outside it show up as `fortiapp-<id>` until mapped with
 `-AppMapCsv`.
 - **Usage checks depend on what the platform exports.** Panorama's
-  used/unused/partially used verdicts only exist on PAN-OS, and SRX
-  doesn't export a last hit date, so `stale_last_hit` can't run there.
-- **FortiGate import scope.** Central NAT, local-in, multicast and proxy
-  policies aren't read. IPv6 objects are imported, but containment logic
-  is IPv4 only.
+  used/unused/partially used verdicts exist only on PAN-OS; SRX exports
+  no last hit date, so `stale_last_hit` does not run there.
+- **FortiGate import scope.** Objects from different VDOMs share one
+  namespace (the same name with different values in two VDOMs collides).
+  Central NAT, local-in, multicast and proxy policies are not read. IPv6
+  objects are imported but containment logic is IPv4 only.
 - **SRX import scope.** Configuration groups other than `junos-defaults`
-  aren't expanded, and NAT isn't read. AppSecure names are mapped by a
-  small built-in table plus lowercasing, so double check unusual
-  signatures, and add the missing ones with `-AppMapCsv`.
+  are not expanded, NAT is not read, and address names are one namespace
+  across address books (a collision is reported). AppSecure names are
+  mapped by a small built-in table plus lowercasing; verify unusual
+  signatures and extend with `-AppMapCsv`.
+- **Cloud import scope.** One export is one subscription, region or
+  project; NSGs or groups from several go in several runs. Rules are
+  compared within their own NSG, security group or network only:
+  effective access through two layers (a subnet NSG and a NIC NSG, a
+  security group and a network ACL, hierarchical GCP firewall policies)
+  is not combined. AWS network ACLs, Azure Firewall, GCP network firewall
+  policies and Cloud Armor are not read. Referenced groups, application
+  security groups, prefix lists and tags are compared by name, never by
+  their members, and never count as internet. IPv6 ranges are compared by
+  text only. Default and implied rules are part of the policy and take
+  part in the comparisons. The six Azure default rules are never reported
+  on (they can't be edited); the AWS default egress rule and the GCP
+  implied rules are reported like any other rule, and their names give
+  them away when you want to set them aside in the report filters:
+  `(default egress)` on AWS, `implied-deny-ingress` /
+  `implied-allow-egress` on GCP.
+- **Cloud import is validated on synthetic and documentation samples
+  only.** The three demos are generated by `tools/New-CloudSamples.ps1`,
+  and the importers were also run on the sample outputs in the official
+  AWS and Azure documentation. No export from a live environment has been
+  tested yet, and Google Cloud has no vendor sample at all. Check the
+  first reports against the console, and report an export that is
+  misread.
 - **Large rulesets (roughly 6,000+ rules) get noticeably slow.** The
   duplicate/shadow detection checks are fundamentally n^2: every rule
   gets compared against earlier ones. Zone-pair bucketing (see
