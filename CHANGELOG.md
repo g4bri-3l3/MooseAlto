@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- The default Gemini model is now `gemini-3.8-flash` (was `gemini-3.7-flash`). Pass `-Model` to use another one.
 
 ## [4.0] - 2026-10-07
 ### Added

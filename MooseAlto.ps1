@@ -161,7 +161,7 @@
 .PARAMETER ApiKey
     Gemini API key. Defaults to $env:GEMINI_API_KEY.
 .PARAMETER Model
-    Gemini model name. Defaults to gemini-3.7-flash.
+    Gemini model name. Defaults to gemini-3.8-flash.
 
 .EXAMPLE
     .\MooseAlto.ps1 -InputCsv export.csv -OutHtml report.html -OutCsv report.csv
@@ -195,7 +195,7 @@ Param(
     [string]$OutJson = "",
     [switch]$SkipLLM,
     [string]$ApiKey = $env:GEMINI_API_KEY,
-    [string]$Model = "gemini-3.7-flash"
+    [string]$Model = "gemini-3.8-flash"
 )
 
 # One timestamp for both default names, so the .html and .csv match.
