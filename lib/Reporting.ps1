@@ -276,8 +276,8 @@ function Get-ReportLines {
 
     $inboundCount = 0; $outboundCount = 0; $bothCount = 0; $internalCount = 0
     foreach ($r in $allowRules) {
-        $srcInet = Test-SideIsInternet -Zones $r.SrcZone -AddrTokens $r.SrcAddr -InternetZoneSet $InternetZoneSet
-        $dstInet = Test-SideIsInternet -Zones $r.DstZone -AddrTokens $r.DstAddr -InternetZoneSet $InternetZoneSet
+        $srcInet = Test-RuleSideIsInternet -Rule $r -Side Src -InternetZoneSet $InternetZoneSet
+        $dstInet = Test-RuleSideIsInternet -Rule $r -Side Dst -InternetZoneSet $InternetZoneSet
         if ($srcInet -and $dstInet) { $bothCount++ }
         elseif ($srcInet) { $inboundCount++ }
         elseif ($dstInet) { $outboundCount++ }

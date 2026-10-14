@@ -323,6 +323,18 @@ function Test-SideIsInternet {
     return $false
 }
 
+function Test-RuleSideIsInternet {
+    # The cloud importers know which side is the internet (they read service
+    # tags and 0.0.0.0/0 themselves) and say so in SrcIsInternet /
+    # DstIsInternet, because their remote side has zone "any" so the pairwise
+    # checks compare it by address. Every other rule goes by zone and address.
+    param($Rule, [ValidateSet('Src', 'Dst')][string]$Side, [array]$InternetZoneSet)
+    $p = $Rule.PSObject.Properties["${Side}IsInternet"]
+    if ($p -and $null -ne $p.Value) { return [bool]$p.Value }
+    if ($Side -eq 'Src') { return Test-SideIsInternet -Zones $Rule.SrcZone -AddrTokens $Rule.SrcAddr -InternetZoneSet $InternetZoneSet }
+    return Test-SideIsInternet -Zones $Rule.DstZone -AddrTokens $Rule.DstAddr -InternetZoneSet $InternetZoneSet
+}
+
 # --------------------------------------------------------------------------
 # Deterministic checks
 # --------------------------------------------------------------------------
@@ -418,8 +430,8 @@ function Invoke-DeterministicChecks {
 
         if ($rule.Action -ne "allow") { continue }
 
-        $srcIsInet = Test-SideIsInternet -Zones $rule.SrcZone -AddrTokens $rule.SrcAddr -InternetZoneSet $InternetZoneSet
-        $dstIsInet = Test-SideIsInternet -Zones $rule.DstZone -AddrTokens $rule.DstAddr -InternetZoneSet $InternetZoneSet
+        $srcIsInet = Test-RuleSideIsInternet -Rule $rule -Side Src -InternetZoneSet $InternetZoneSet
+        $dstIsInet = Test-RuleSideIsInternet -Rule $rule -Side Dst -InternetZoneSet $InternetZoneSet
 
         # A named internet zone as source is as open as "any".
         $srcZoneFullyOpen = ($rule.SrcZone -contains "any") -or (Test-ZoneTouchesInternet -Zones $rule.SrcZone -InternetZoneSet $InternetZoneSet)
@@ -434,13 +446,16 @@ function Invoke-DeterministicChecks {
             }
         }
 
-        if (Test-IsNegatedPublicPattern -RawTokens $rule.SrcAddr -Strict) {
+        # Cloud rules can't negate: a negation there is the importer's model
+        # of a public-only service tag (Azure Internet), not a trick.
+        $ruleIsCloud = $rule.Vendor -in @('azure', 'aws', 'gcp')
+        if (-not $ruleIsCloud -and (Test-IsNegatedPublicPattern -RawTokens $rule.SrcAddr -Strict)) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "negated_rfc1918_effectively_public"
                 Detail   = "Source address ('$($rule.SrcAddrRaw)') negates the private RFC1918 ranges. Functionally equivalent to 'any public source address', even though no token literally says 'any'. Easy to miss in manual review."
             }
         }
-        if (Test-IsNegatedPublicPattern -RawTokens $rule.DstAddr -Strict) {
+        if (-not $ruleIsCloud -and (Test-IsNegatedPublicPattern -RawTokens $rule.DstAddr -Strict)) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "High"; Type = "negated_rfc1918_effectively_public"
                 Detail   = "Destination address ('$($rule.DstAddrRaw)') negates the private RFC1918 ranges. Functionally equivalent to 'any public destination address', even though no token literally says 'any'. Easy to miss in manual review."
@@ -613,6 +628,9 @@ function Invoke-DeterministicChecks {
             if ($rule.Vendor -eq 'junos') {
                 $portDetail = "Rule matches by port ($($rule.ServiceRaw)) with no dynamic application.$extraNote Consider matching the application with AppSecure (match dynamic-application, with application junos-defaults), so traffic is identified by application rather than by port alone."
             }
+            # Cloud rules match ports only; there's no application
+            # to match, so the advice would have nowhere to go.
+            if ($rule.Vendor -in @('azure', 'aws', 'gcp')) { $skipPortBased = $true }
             if (-not $skipPortBased) {
                 $findings += [PSCustomObject]@{
                     RuleName = $rule.Name; Severity = "Medium"; Type = "port_based_rule_missing_app_id"
@@ -687,8 +705,11 @@ function Invoke-DeterministicChecks {
             # their own findings. The text says whether the zone or the
             # address is what's open.
             $zoneIsTheReason = Test-ZoneTouchesInternet -Zones $rule.SrcZone -InternetZoneSet $InternetZoneSet
-            $zonePhrase = if ($zoneIsTheReason) { "source zone '$($rule.SrcZone -join ';')' is internet-facing" } else { "source address itself includes public IP space" }
-            $addrPhrase = if ($null -eq $rule.SrcAddr) { "with an unrestricted source address (any), reachable from anywhere on the internet" } else { "though scoped to a specific source address ('$($rule.SrcAddrRaw)'), not an unrestricted source" }
+            # Cloud: any address, or a tag meaning every public address
+            # (Azure Internet), is as open as it gets.
+            $srcCloudOpen = $ruleIsCloud -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.SrcAddr)
+            $zonePhrase = if ($zoneIsTheReason) { "source zone '$($rule.SrcZone -join ';')' is internet-facing" } elseif ($srcCloudOpen) { "the source is any public address" } else { "source address itself includes public IP space" }
+            $addrPhrase = if ($null -eq $rule.SrcAddr -or $srcCloudOpen) { "with an unrestricted source address (any), reachable from anywhere on the internet" } else { "though scoped to a specific source address ('$($rule.SrcAddrRaw)'), not an unrestricted source" }
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "inbound_from_internet"
                 Detail   = "Inbound rule reachable from the internet ($zonePhrase) $addrPhrase, reaching destination zone='$($rule.DstZone -join ';')', address='$($rule.DstAddrRaw)'."
@@ -698,8 +719,9 @@ function Invoke-DeterministicChecks {
         if ($dstIsInet) {
             # Same thing for the destination side.
             $dstZoneIsTheReason = Test-ZoneTouchesInternet -Zones $rule.DstZone -InternetZoneSet $InternetZoneSet
-            $dstZonePhrase = if ($dstZoneIsTheReason) { "destination zone '$($rule.DstZone -join ';')' is internet-facing" } else { "destination address itself includes public IP space" }
-            $dstAddrPhrase = if ($null -eq $rule.DstAddr) { "with an unrestricted destination address (any), reaching anywhere on the internet" } else { "though scoped to a specific destination address ('$($rule.DstAddrRaw)'), not an unrestricted destination" }
+            $dstCloudOpen = $ruleIsCloud -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr)
+            $dstZonePhrase = if ($dstZoneIsTheReason) { "destination zone '$($rule.DstZone -join ';')' is internet-facing" } elseif ($dstCloudOpen) { "the destination is any public address" } else { "destination address itself includes public IP space" }
+            $dstAddrPhrase = if ($null -eq $rule.DstAddr -or $dstCloudOpen) { "with an unrestricted destination address (any), reaching anywhere on the internet" } else { "though scoped to a specific destination address ('$($rule.DstAddrRaw)'), not an unrestricted destination" }
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "outbound_to_internet"
                 Detail   = "Outbound rule reaching the internet ($dstZonePhrase) $dstAddrPhrase, from source zone='$($rule.SrcZone -join ';')', address='$($rule.SrcAddrRaw)'."
@@ -715,7 +737,9 @@ function Invoke-DeterministicChecks {
 
         # Application any with a fixed port is a port-based rule, not an open
         # one (port_based_rule_missing_app_id covers it).
-        if (-not $srcIsInet -and $dstIsInet -and $null -ne $rule.DstAddr -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
+        # A cloud destination of every public address isn't "defined".
+        $dstDefined = $null -ne $rule.DstAddr -and -not ($ruleIsCloud -and (Test-AddressFieldEffectivelyAny -RawTokens $rule.DstAddr))
+        if (-not $srcIsInet -and $dstIsInet -and $dstDefined -and $null -eq $rule.Application -and (Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw)) {
             $findings += [PSCustomObject]@{
                 RuleName = $rule.Name; Severity = "Medium"; Type = "outbound_defined_dest_any_app"
                 Detail   = "Outbound to a defined destination ($($rule.DstAddrRaw)), but application/service is unrestricted (any). Consider scoping to the specific application(s) actually needed."
@@ -1217,7 +1241,10 @@ function Invoke-DeterministicChecks {
             foreach ($rule in $scopeRules) {
                 if ($rule.Disabled -or (Get-ActionClass $rule.Action) -ne "deny") { continue }
                 $ruleServiceEffectivelyAny = Test-ServiceEffectivelyAny -ParsedService $rule.Service -Application $rule.Application -ServiceRaw $rule.ServiceRaw
-                if (($rule.SrcZone -contains "any") -and ($rule.DstZone -contains "any") -and
+                # Cloud rules never have zone "any" (the importers name both
+                # sides); any address on both sides is the broad deny there.
+                $zonesCoverAll = (($rule.SrcZone -contains "any") -and ($rule.DstZone -contains "any")) -or ($rule.Vendor -in @('azure', 'aws', 'gcp'))
+                if ($zonesCoverAll -and
                     $null -eq $rule.SrcAddr -and $null -eq $rule.DstAddr -and $null -eq $rule.Application -and $ruleServiceEffectivelyAny -and
                     $rule.HasOptionsColumn -and $rule.Options -and ($rule.Options.ToLower() -match "$loggingPattern|$forwardingPattern")) {
                     $hasExplicitLoggedCleanupDeny = $true
@@ -1235,6 +1262,17 @@ function Invoke-DeterministicChecks {
                 Detail   = $cleanupDetail
             }
         }
+    }
+
+    # Azure's six default rules can't be edited or deleted, so findings about
+    # them are noise. They stay in the model: custom rules are still compared
+    # with them (a custom allow behind DenyAllInBound is still reported).
+    $azureDefaultNames = @{}
+    foreach ($r in $Rules) {
+        if ($r.Vendor -eq 'azure' -and $r.Tags -eq 'azure-default') { $azureDefaultNames[$r.Name] = $true }
+    }
+    if ($azureDefaultNames.Count -gt 0) {
+        $findings = @($findings | Where-Object { -not $azureDefaultNames.ContainsKey($_.RuleName) })
     }
 
     return $findings
@@ -1281,8 +1319,8 @@ function Build-InternetExposureInventory {
     $inventory = @()
     foreach ($rule in $Rules) {
         if ($rule.Disabled -or $rule.Action -ne "allow") { continue }
-        $srcIsInet = Test-SideIsInternet -Zones $rule.SrcZone -AddrTokens $rule.SrcAddr -InternetZoneSet $InternetZoneSet
-        $dstIsInet = Test-SideIsInternet -Zones $rule.DstZone -AddrTokens $rule.DstAddr -InternetZoneSet $InternetZoneSet
+        $srcIsInet = Test-RuleSideIsInternet -Rule $rule -Side Src -InternetZoneSet $InternetZoneSet
+        $dstIsInet = Test-RuleSideIsInternet -Rule $rule -Side Dst -InternetZoneSet $InternetZoneSet
         if (-not ($srcIsInet -or $dstIsInet)) { continue }
 
         # Prefer a concrete Inbound/Outbound classification whenever one
@@ -1294,6 +1332,9 @@ function Build-InternetExposureInventory {
         # sides are independently, definitely internet-facing.
         $srcIsDefinite = (Test-ZoneIsNamedInternetZone -Zones $rule.SrcZone -InternetZoneSet $InternetZoneSet) -or (Test-AddressIsExclusivelyPublic -AddrTokens $rule.SrcAddr)
         $dstIsDefinite = (Test-ZoneIsNamedInternetZone -Zones $rule.DstZone -InternetZoneSet $InternetZoneSet) -or (Test-AddressIsExclusivelyPublic -AddrTokens $rule.DstAddr)
+        # Cloud rules say which side is the internet; a public IP on the
+        # protected side (an NSG in front of a public VM) is not direction.
+        if ($rule.PSObject.Properties['SrcIsInternet']) { $srcIsDefinite = $srcIsInet; $dstIsDefinite = $dstIsInet }
 
         if ($srcIsDefinite -and -not $dstIsDefinite) {
             $direction = "Inbound"

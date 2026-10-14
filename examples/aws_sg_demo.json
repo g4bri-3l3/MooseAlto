@@ -1,0 +1,360 @@
+{
+  "SecurityGroups": [
+    {
+      "Description": "web-sg security group",
+      "GroupName": "web-sg",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 443,
+          "ToPort": 443,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [
+            {
+              "CidrIpv6": "::/0"
+            }
+          ],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 80,
+          "ToPort": 80,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 22,
+          "ToPort": 22,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0",
+              "Description": "temp ssh for vendor"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 22,
+          "ToPort": 22,
+          "IpRanges": [
+            {
+              "CidrIp": "10.0.0.0/16",
+              "Description": "admins"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "OwnerId": "111122223333",
+      "GroupId": "sg-0a1a1a1a1a1a1a1a1",
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "VpcId": "vpc-0111"
+    },
+    {
+      "Description": "app-sg security group",
+      "GroupName": "app-sg",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 8080,
+          "ToPort": 8080,
+          "IpRanges": [],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": [
+            {
+              "GroupId": "sg-0a1a1a1a1a1a1a1a1",
+              "UserId": "111122223333"
+            }
+          ]
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 22,
+          "ToPort": 22,
+          "IpRanges": [
+            {
+              "CidrIp": "10.0.0.0/16"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "OwnerId": "111122223333",
+      "GroupId": "sg-0b2b2b2b2b2b2b2b2",
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 443,
+          "ToPort": 443,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "udp",
+          "FromPort": 53,
+          "ToPort": 53,
+          "IpRanges": [
+            {
+              "CidrIp": "8.8.8.8/32"
+            },
+            {
+              "CidrIp": "1.1.1.1/32"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "VpcId": "vpc-0111"
+    },
+    {
+      "Description": "db-sg security group",
+      "GroupName": "db-sg",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 3306,
+          "ToPort": 3306,
+          "IpRanges": [],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": [
+            {
+              "GroupId": "sg-0b2b2b2b2b2b2b2b2",
+              "UserId": "111122223333"
+            }
+          ]
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 3306,
+          "ToPort": 3306,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0",
+              "Description": "debug"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": [
+            {
+              "GroupId": "sg-0c3c3c3c3c3c3c3c3",
+              "UserId": "111122223333"
+            }
+          ]
+        }
+      ],
+      "OwnerId": "111122223333",
+      "GroupId": "sg-0c3c3c3c3c3c3c3c3",
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "VpcId": "vpc-0111"
+    },
+    {
+      "Description": "default VPC security group",
+      "GroupName": "default",
+      "IpPermissions": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": [
+            {
+              "GroupId": "sg-0d4d4d4d4d4d4d4d4",
+              "UserId": "111122223333"
+            }
+          ]
+        }
+      ],
+      "OwnerId": "111122223333",
+      "GroupId": "sg-0d4d4d4d4d4d4d4d4",
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "VpcId": "vpc-0111"
+    },
+    {
+      "Description": "legacy-ftp security group",
+      "GroupName": "legacy-ftp",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 20,
+          "ToPort": 21,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "udp",
+          "FromPort": 161,
+          "ToPort": 161,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "icmp",
+          "FromPort": 8,
+          "ToPort": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 3389,
+          "ToPort": 3389,
+          "IpRanges": [],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [
+            {
+              "PrefixListId": "pl-0123456789abcdef0"
+            }
+          ],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "OwnerId": "111122223333",
+      "GroupId": "sg-0e5e5e5e5e5e5e5e5",
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [
+            {
+              "CidrIpv6": "::/0"
+            }
+          ],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "VpcId": "vpc-0222"
+    },
+    {
+      "Description": "web-sg security group",
+      "GroupName": "web-sg",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 443,
+          "ToPort": 443,
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "OwnerId": "111122223333",
+      "GroupId": "sg-0f6f6f6f6f6f6f6f6",
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "Ipv6Ranges": [],
+          "PrefixListIds": [],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "VpcId": "vpc-0222"
+    }
+  ]
+}
