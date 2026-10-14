@@ -809,8 +809,6 @@ intrazone default is covered by `missing_explicit_intrazone_internet_deny`,
 for the Palo Alto devices of the file), section title rows, and every column not listed in the table above
 (the parser finds columns by name and ignores the others). Source
 user, URL category and schedule are listed in the normalization notes.
-`examples/tufin_rule_viewer_sample.csv` (from `tools/New-TufinSample.py`)
-is a synthetic export with five vendors.
 
 ### Cloud firewall rules: Azure NSG, AWS security groups, Google Cloud (`-InputConfig`)
 
@@ -1280,7 +1278,7 @@ $env:GEMINI_API_KEY = "..."   # only needed if you plan to use AI analysis
 .\MooseAlto.ps1 -InputCsv export.csv -OutHtml report.html -OutCsv report.csv -SkipLLM
 
 # AI analysis of a report saved by an earlier run (no ruleset parsing):
-.\MooseAlto.ps1 -AnalyzeFindingsCsv report_20260928_101500.csv
+.\MooseAlto.ps1 -AnalyzeFindingsCsv output\report_20260928_101500.csv
 
 # Rulebase plus a separate rule usage export (replaces the usage columns):
 .\MooseAlto.ps1 -InputCsv export.csv -HitCountFile rule_usage.csv -OutHtml report.html -OutCsv report.csv

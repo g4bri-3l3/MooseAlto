@@ -104,10 +104,11 @@
     PAN-OS style CSVs (rules, address objects, address groups), useful for
     debugging an import or feeding another tool.
 .PARAMETER OutHtml
-    Path to write the HTML report (default: report_<timestamp>.html, so
-    repeated runs never overwrite each other).
+    Path to write the HTML report (default: output\report_<timestamp>.html,
+    so repeated runs never overwrite each other). The default outputs all go
+    to the "output" folder under the current directory, created if missing.
 .PARAMETER OutCsv
-    Path to write the findings CSV (default: report_<timestamp>.csv, same
+    Path to write the findings CSV (default: output\report_<timestamp>.csv, same
     timestamp as OutHtml). A second file with the same base name plus
     "_inventory" is always written alongside it, covering the Internet
     Exposure Inventory as its own CSV.
@@ -168,7 +169,7 @@
 .EXAMPLE
     .\MooseAlto.ps1 -InputConfig fw01.conf -HitCountFile fw01_policy_stats.json -OutHtml report.html
 .EXAMPLE
-    .\MooseAlto.ps1 -AnalyzeFindingsCsv report_20260928_101500.csv
+    .\MooseAlto.ps1 -AnalyzeFindingsCsv output\report_20260928_101500.csv
 .EXAMPLE
     .\MooseAlto.ps1 -InputConfig srx01_display_set.txt -HitCountFile srx01_hitcount.txt -OutHtml report.html
 #>
@@ -198,10 +199,26 @@ Param(
     [string]$Model = "gemini-3.8-flash"
 )
 
-# One timestamp for both default names, so the .html and .csv match.
+# One timestamp for both default names, so the .html and .csv match. The
+# default outputs (report, findings, inventory, context, normalization) all
+# go to an "output" folder under the current directory.
 $defaultTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-if (-not $OutHtml) { $OutHtml = "report_$defaultTimestamp.html" }
-if (-not $OutCsv) { $OutCsv = "report_$defaultTimestamp.csv" }
+if (-not $OutHtml) { $OutHtml = Join-Path 'output' "report_$defaultTimestamp.html" }
+if (-not $OutCsv) { $OutCsv = Join-Path 'output' "report_$defaultTimestamp.csv" }
+
+# Creates the parent folder of each output path that doesn't exist yet, so
+# the default "output" folder (or one named in -OutHtml/-OutCsv/-OutJson)
+# appears only when something is actually written to it.
+function Initialize-OutputFolders {
+    param([string[]]$Paths)
+    foreach ($p in $Paths) {
+        if (-not $p) { continue }
+        $dir = Split-Path -Path $p -Parent
+        if ($dir -and -not (Test-Path -Path $dir -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $dir -Force)
+        }
+    }
+}
 
 # --------------------------------------------------------------------------
 # Banner. Always shown, whether or not parameters were supplied.
@@ -958,6 +975,7 @@ if ($AnalyzeFindingsCsv) {
         Write-Host "Note: -OutCsv is ignored with -AnalyzeFindingsCsv; this mode only writes the HTML report." -ForegroundColor Yellow
     }
     $OutCsv = $null
+    Initialize-OutputFolders -Paths @($OutHtml, $OutJson)
 
     $findings = $saved.Findings
     $rules = $saved.Rules
@@ -1041,6 +1059,8 @@ if ($HitCountFile -and -not (Test-Path -Path $HitCountFile -PathType Leaf)) {
     Write-Host "ERROR: Hit counter file not found: $HitCountFile" -ForegroundColor Red
     return
 }
+
+Initialize-OutputFolders -Paths @($OutHtml, $OutCsv, $OutJson)
 
 $importResult = $null
 if ($inputVendor -eq 'paloalto-csv') {

@@ -2,9 +2,13 @@
 .env
 
 # Reports generated at runtime by MooseAlto.ps1 (timestamp based filenames)
+output/
 report_*.html
 report_*.csv
 *_inventory.csv
+report_*.context.json
+*.context.json
+*_normalization.txt
 
 # OS / editor
 .DS_Store
