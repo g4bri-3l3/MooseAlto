@@ -666,6 +666,24 @@ function Invoke-DeterministicChecks {
             }
         }
 
+        # Session start logs are a debugging aid: they add log volume
+        # without information the session end log doesn't already carry.
+        if ($rule.Action -eq "allow" -and $rule.HasOptionsColumn -and $rule.Options -and $rule.Options.ToLower() -match "session start") {
+            $startSetting = "log at session start"
+            if ($rule.Vendor -eq 'fortios') { $startSetting = "logtraffic-start" }
+            elseif ($rule.Vendor -eq 'junos') { $startSetting = "log session-init" }
+            if ($rule.Options.ToLower() -match "session end") {
+                $startDetail = "Every session through this rule is logged twice, once when it starts and once when it ends, which roughly doubles the log volume sent to the firewall's log storage and the SIEM. The session end log already carries everything the start log has, plus bytes, duration, final application and end reason."
+            }
+            else {
+                $startDetail = "Sessions through this rule are logged only when they start, before the application is fully identified and with no bytes, duration or end reason, and long sessions can produce several start logs as the application shifts. Logging at session end gives a more useful record for the same or lower volume."
+            }
+            $findings += [PSCustomObject]@{
+                RuleName = $rule.Name; Severity = "Low"; Type = "log_at_session_start"
+                Detail   = "Rule has $startSetting enabled. $startDetail Session start logging is only needed while troubleshooting a specific flow; disable it once debugging is done."
+            }
+        }
+
         # A public resolver bypasses corporate DNS, whatever the protocol.
         if ($rule.Action -eq "allow") {
             $resolverMatches = Get-KnownDnsResolverMatches -AddrTokens $rule.DstAddr
@@ -1306,6 +1324,7 @@ function Add-DeterministicSuggestedFixes {
         "generic_rule_name"             = "Rename this rule to describe the traffic it actually controls (source, destination, or purpose), instead of relying on rule order to convey intent."
         "compliance_tag_without_critical_zone" = "Confirm with the rule owner whether the tag or the -CriticalZones list is out of date. Update whichever one no longer reflects reality."
         "no_explicit_deny_log_rule"     = "Add an explicit deny any/any/any rule at the bottom of the rulebase with logging enabled."
+        "log_at_session_start"          = "Disable logging at session start unless this flow is being debugged; keep logging at session end."
     }
     foreach ($f in $Findings) {
         if ($deterministicSuggestions.ContainsKey($f.Type)) {

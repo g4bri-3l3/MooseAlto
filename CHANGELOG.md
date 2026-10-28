@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- `log_at_session_start` (Low): allow rule with logging at session start enabled (PAN-OS "Log at Session Start", FortiOS `logtraffic-start`, SRX `session-init`). Session start logging is only needed while debugging a flow; with session end logging also on it doubles the log volume, and on its own it records less than session end logging would.
+
 ### Changed
 - The default Gemini model is now `gemini-3.8-flash` (was `gemini-3.7-flash`). Pass `-Model` to use another one.
 - Without `-OutHtml` / `-OutCsv`, every output of a run (HTML report, findings CSV, `_inventory.csv`, `.context.json`, `_normalization.txt`) is written to an `output` folder under the current directory, created if missing, instead of the current directory itself. Explicit paths are used as given; a missing parent folder is created for them too.
